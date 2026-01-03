@@ -1,6 +1,7 @@
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Check, Circle, Pencil, ArrowRight } from "lucide-react";
+import { Check, Circle, Pencil, ArrowRight, Loader2 } from "lucide-react";
+import { useState } from "react";
 
 interface FileProposal {
   id: string;
@@ -31,6 +32,9 @@ export function FileCard({
   onEdit,
   isExiting = false,
 }: FileCardProps) {
+  const [imageLoaded, setImageLoaded] = useState(false);
+  const [imageError, setImageError] = useState(false);
+
   return (
     <motion.div
       layout
@@ -81,15 +85,22 @@ export function FileCard({
       </motion.button>
 
       {/* Thumbnail */}
-      <div className="w-20 h-14 rounded-lg bg-white/5 overflow-hidden shrink-0 border border-white/5">
-        <img
+      <div className="w-20 h-14 rounded-lg bg-white/5 overflow-hidden shrink-0 border border-white/5 relative">
+        {/* Loading spinner */}
+        {!imageLoaded && !imageError && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 text-white/20 animate-spin" />
+          </div>
+        )}
+        <motion.img
           src={convertFileSrc(file.original_path)}
           alt=""
           className="w-full h-full object-cover"
-          onError={(e) => {
-            const target = e.target as HTMLImageElement;
-            target.style.display = 'none';
-          }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: imageLoaded ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          onLoad={() => setImageLoaded(true)}
+          onError={() => setImageError(true)}
         />
       </div>
 
@@ -149,7 +160,6 @@ export function FileCard({
 }
 
 // File list container with AnimatePresence
-import { AnimatePresence } from "framer-motion";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface FileListProps {
