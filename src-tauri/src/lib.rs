@@ -302,6 +302,86 @@ fn stop_watch(state: State<WatcherState>) -> Result<String, String> {
     Ok("Stopped watching".to_string())
 }
 
+// Re-analyze a file to get a more specific subcategory
+#[derive(Serialize, Clone)]
+struct SubcategoryResult {
+    id: String,
+    subcategory: String,
+}
+
+#[tauri::command]
+async fn get_subcategory(file_path: String, parent_category: String, api_key: String) -> Result<SubcategoryResult, String> {
+    println!("[RUST] get_subcategory called for: {}", file_path);
+    
+    let path = std::path::Path::new(&file_path);
+    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    
+    let Ok(image_data) = std::fs::read(&path) else { 
+        return Err("Failed to read file".to_string()); 
+    };
+    let base64_image = base64::encode(&image_data);
+
+    let client = reqwest::Client::new();
+    let prompt = format!(
+        "This screenshot is currently categorized as '{}'. Look at the image and give a MORE SPECIFIC subcategory. \
+        Output ONLY a JSON object with 'subcategory' (2-3 words max, be specific based on what you see). \
+        Examples for Finance: 'Receipts', 'Bank_Statements', 'Invoices', 'Tax_Documents', 'Subscriptions'. \
+        Examples for Dev: 'Terminal', 'Code_Editor', 'Documentation', 'GitHub', 'Errors'. \
+        Example output: {{\"subcategory\": \"Bank_Statements\"}}",
+        parent_category
+    );
+
+    let messages = vec![
+        AnthropicMessage {
+            role: "user".to_string(),
+            content: vec![
+                AnthropicContent::Image {
+                    source: AnthropicImageSource {
+                        source_type: "base64".to_string(),
+                        media_type: "image/png".to_string(),
+                        data: base64_image,
+                    }
+                },
+                AnthropicContent::Text { text: prompt }
+            ]
+        }
+    ];
+
+    let request_body = serde_json::json!({
+        "model": "claude-opus-4-5-20251101",
+        "max_tokens": 256,
+        "messages": messages
+    });
+
+    let res = client.post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    
+    if let Some(content) = json["content"][0]["text"].as_str() {
+        let clean_json = content.trim().replace("```json", "").replace("```", "");
+        
+        #[derive(Deserialize)]
+        struct SubResp { subcategory: String }
+        
+        if let Ok(parsed) = serde_json::from_str::<SubResp>(&clean_json) {
+            println!("[RUST] Subcategory for {}: {}", filename, parsed.subcategory);
+            return Ok(SubcategoryResult {
+                id: filename,
+                subcategory: parsed.subcategory,
+            });
+        }
+    }
+    
+    Err("Failed to parse subcategory".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -311,7 +391,7 @@ pub fn run() {
             watcher: Mutex::new(None),
             api_key: Mutex::new(String::new()),
         })
-        .invoke_handler(tauri::generate_handler![start_watch, stop_watch, execute_action])
+        .invoke_handler(tauri::generate_handler![start_watch, stop_watch, execute_action, get_subcategory])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

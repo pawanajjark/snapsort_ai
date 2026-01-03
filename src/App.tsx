@@ -2,10 +2,10 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { 
-  FolderOpen, Settings, Sparkles, Loader2, Check, X, Pencil, 
+import {
+  FolderOpen, Settings, Sparkles, Loader2, Check, X, Pencil,
   CheckCircle2, Circle, FolderPlus, ArrowRight, ChevronLeft,
-  Save, Image
+  Save, Image, Layers
 } from "lucide-react";
 
 interface FileProposal {
@@ -58,6 +58,9 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [tempApiKey, setTempApiKey] = useState(apiKey);
   const [tempPath, setTempPath] = useState(path);
+  const [organizingCategory, setOrganizingCategory] = useState<string | null>(null);
+
+  const LARGE_FOLDER_THRESHOLD = 10;
 
   // Group proposals by category
   const categories = proposals.reduce((acc, p) => {
@@ -147,6 +150,43 @@ function App() {
     setApiKey(tempApiKey);
     setPath(tempPath);
     setShowSettings(false);
+  }
+
+  // Organize folder into subfolders using AI analysis
+  const [organizeProgress, setOrganizeProgress] = useState({ current: 0, total: 0 });
+  
+  async function organizeFolder(category: string) {
+    setOrganizingCategory(category);
+    const filesToOrganize = proposals.filter(p => p.proposed_category === category);
+    setOrganizeProgress({ current: 0, total: filesToOrganize.length });
+
+    // Analyze each file with AI to get more specific subcategory
+    for (let i = 0; i < filesToOrganize.length; i++) {
+      const file = filesToOrganize[i];
+      setOrganizeProgress({ current: i + 1, total: filesToOrganize.length });
+
+      try {
+        const result = await invoke<{ id: string; subcategory: string }>("get_subcategory", {
+          filePath: file.original_path,
+          parentCategory: category,
+          apiKey: apiKey
+        });
+
+        // Update with AI-suggested subcategory
+        setProposals(prev => prev.map(p =>
+          p.id === file.id
+            ? { ...p, proposed_category: `${category}/${result.subcategory}` }
+            : p
+        ));
+      } catch (e) {
+        console.error("Failed to get subcategory:", e);
+        // Keep original category if failed
+      }
+    }
+
+    setOrganizingCategory(null);
+    setOrganizeProgress({ current: 0, total: 0 });
+    setSelectedCategory(null);
   }
 
   async function acceptAll() {
@@ -329,23 +369,32 @@ function App() {
                 const selectedInCategory = files.filter(f => f.selected).length;
                 const isSelected = selectedCategory === category;
                 const style = getFolderStyle(category);
-                
+                const isLargeFolder = files.length > LARGE_FOLDER_THRESHOLD;
+
                 return (
                   <button
                     key={category}
                     onClick={() => setSelectedCategory(category)}
                     className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all group animate-slide-in ${
-                      isSelected 
-                        ? `${style.bg} ring-1 ring-white/10` 
+                      isSelected
+                        ? `${style.bg} ring-1 ring-white/10`
                         : 'hover:bg-white/5'
                     }`}
                     style={{ animationDelay: `${index * 50}ms` }}
                   >
                     <span className="text-xl">{style.icon}</span>
                     <div className="flex-1 min-w-0">
-                      <span className={`text-sm font-semibold block truncate ${isSelected ? style.color : 'text-white/80'}`}>
-                        {category}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-sm font-semibold truncate ${isSelected ? style.color : 'text-white/80'}`}>
+                          {category}
+                        </span>
+                        {isLargeFolder && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 flex items-center gap-1">
+                            <Layers className="w-3 h-3" />
+                            {files.length}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-xs text-white/40">
                         {selectedInCategory} of {files.length} selected
                       </span>
@@ -390,26 +439,71 @@ function App() {
                     <p className="text-xs text-white/40">{filesInSelectedCategory.length} files</p>
                   </div>
                 </div>
-                <button
-                  onClick={() => toggleCategorySelection(selectedCategory)}
-                  className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium transition-all flex items-center gap-2"
-                >
-                  {filesInSelectedCategory.every(f => f.selected) ? (
-                    <>
-                      <Circle className="w-4 h-4" />
-                      Deselect all
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="w-4 h-4" />
-                      Select all
-                    </>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => toggleCategorySelection(selectedCategory)}
+                    className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium transition-all flex items-center gap-2"
+                  >
+                    {filesInSelectedCategory.every(f => f.selected) ? (
+                      <>
+                        <Circle className="w-4 h-4" />
+                        Deselect all
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        Select all
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
               
               {/* Files Grid */}
               <div className="flex-1 overflow-auto p-6">
+                {/* Organize Folder Banner - shown when folder has many files */}
+                {filesInSelectedCategory.length > LARGE_FOLDER_THRESHOLD && (
+                  <button
+                    onClick={() => organizeFolder(selectedCategory)}
+                    disabled={organizingCategory !== null}
+                    className="w-full mb-4 p-4 rounded-2xl bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 border border-violet-500/20 hover:border-violet-500/40 transition-all group hover:scale-[1.005] disabled:cursor-wait"
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className={`w-12 h-12 rounded-xl bg-violet-500/20 flex items-center justify-center ${organizingCategory ? 'animate-pulse' : 'group-hover:scale-110'} transition-transform`}>
+                        {organizingCategory ? (
+                          <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-6 h-6 text-violet-400" />
+                        )}
+                      </div>
+                      <div className="flex-1 text-left">
+                        <p className="font-semibold text-violet-300">
+                          {organizingCategory ? `Analyzing with AI... (${organizeProgress.current}/${organizeProgress.total})` : 'Smart Organize with AI'}
+                        </p>
+                        <p className="text-xs text-white/40">
+                          {organizingCategory
+                            ? 'Claude is analyzing each screenshot for more specific categories'
+                            : `${filesInSelectedCategory.length} files → AI will create specific subfolders like Receipts, Invoices, etc.`}
+                        </p>
+                        {organizingCategory && organizeProgress.total > 0 && (
+                          <div className="mt-2 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+                              style={{ width: `${(organizeProgress.current / organizeProgress.total) * 100}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                      {!organizingCategory && (
+                        <div className="px-4 py-2 rounded-lg bg-violet-500/20 text-violet-400 text-sm font-semibold group-hover:bg-violet-500/30 transition-colors flex items-center gap-2">
+                          <Sparkles className="w-4 h-4" />
+                          Organize
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                )}
+
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   {filesInSelectedCategory.map((file, index) => (
                     <div
