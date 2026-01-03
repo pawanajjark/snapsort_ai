@@ -112,7 +112,7 @@ async fn process_file(path: std::path::PathBuf, api_key: String, app: AppHandle)
     println!("[RUST] Base64 encoded, length: {} chars", base64_image.len());
 
     let client = reqwest::Client::new();
-    let prompt = "Analyze this screenshot. Output JSON with 'new_filename' (snake_case, descriptive .png), 'category' (e.g. Finance, Dev), and 'reasoning' (very short why). Example: {\"new_filename\": \"stripe.png\", \"category\": \"Finance\", \"reasoning\": \"Stripe receipt\"}";
+    let prompt = "Analyze this screenshot. Output JSON with 'new_filename' (snake_case, MAX 3-4 words, concise, descriptive .png), 'category' (e.g. Finance, Dev), and 'reasoning' (very short why). Name should be SHORT. Example: {\"new_filename\": \"stripe_invoice.png\", \"category\": \"Finance\", \"reasoning\": \"Stripe receipt\"}";
 
     let messages = vec![
         AnthropicMessage {
@@ -218,23 +218,40 @@ fn start_watch(app: AppHandle, state: State<WatcherState>, path: String, api_key
     // Process existing files in the directory
     println!("[RUST] 🔍 Scanning for existing files in directory...");
     let dir_path = Path::new(&path);
+    let mut files_to_process = Vec::new();
+
     if let Ok(entries) = std::fs::read_dir(dir_path) {
         for entry in entries.flatten() {
             if let Ok(file_type) = entry.file_type() {
                 if file_type.is_file() {
                     let file_path = entry.path();
-                    println!("[RUST] Found existing file: {:?}", file_path);
-                    let app_h = app.clone();
-                    let k = api_key.clone();
-                    tauri::async_runtime::spawn(async move {
-                        process_file(file_path, k, app_h).await;
-                    });
+                    let filename = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    
+                    let is_png = filename.to_lowercase().ends_with(".png");
+                    let has_screenshot = filename.contains("Screenshot") || filename.contains("Screen Shot");
+                    
+                    if is_png && has_screenshot {
+                        files_to_process.push(file_path);
+                    }
                 }
             }
         }
     } else {
         println!("[RUST] ⚠️ Could not read directory");
     }
+
+    println!("[RUST] Found {} actionable files", files_to_process.len());
+    let _ = app.emit("scan-summary", files_to_process.len());
+
+    for file_path in files_to_process {
+        println!("[RUST] Queueing existing file: {:?}", file_path);
+        let app_h = app.clone();
+        let k = api_key.clone();
+        tauri::async_runtime::spawn(async move {
+            process_file(file_path, k, app_h).await;
+        });
+    }
+
     println!("[RUST] Finished scanning existing files");
     println!("======================================");
 

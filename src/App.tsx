@@ -1,7 +1,12 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { FolderOpen, Play, Square, FileText, Settings, Ghost, Check, X, ArrowRight, Loader2 } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { 
+  FolderOpen, Settings, Sparkles, Folder, 
+  Loader2, Check, X, Pencil, CheckCircle2, Circle,
+  FolderPlus, ArrowRight
+} from "lucide-react";
 
 interface FileProposal {
   id: string;
@@ -10,275 +15,486 @@ interface FileProposal {
   proposed_name: string;
   proposed_category: string;
   reasoning: string;
-}
-
-interface FileLog {
-  original: string;
-  new: string;
-  category: string;
-  status: string;
-  timestamp: string;
+  selected: boolean;
 }
 
 function App() {
   const [apiKey, setApiKey] = useState("");
   const [path, setPath] = useState("/Users/pawan/Desktop");
-  const [isWatching, setIsWatching] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   const [proposals, setProposals] = useState<FileProposal[]>([]);
-  const [logs, setLogs] = useState<FileLog[]>([]);
-  const [statusMsg, setStatusMsg] = useState("");
-  const [debugLog, setDebugLog] = useState<string[]>([]);
-  const [isTauriAvailable, setIsTauriAvailable] = useState(true);
+  const [totalFiles, setTotalFiles] = useState(0);
+  const [processedFiles, setProcessedFiles] = useState(0);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileProposal | null>(null);
+  const [editingFile, setEditingFile] = useState<FileProposal | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editCategory, setEditCategory] = useState("");
 
-  const addDebugLog = (message: string) => {
-    const timestamp = new Date().toLocaleTimeString();
-    setDebugLog(prev => [`[${timestamp}] ${message}`, ...prev].slice(0, 50));
-  };
+  // Group proposals by category
+  const categories = proposals.reduce((acc, p) => {
+    if (!acc[p.proposed_category]) {
+      acc[p.proposed_category] = [];
+    }
+    acc[p.proposed_category].push(p);
+    return acc;
+  }, {} as Record<string, FileProposal[]>);
+
+  const categoryList = Object.keys(categories).sort();
+  const filesInSelectedCategory = selectedCategory ? categories[selectedCategory] || [] : [];
+  const selectedCount = proposals.filter(p => p.selected).length;
+  const totalCount = proposals.length;
 
   useEffect(() => {
-    console.log("[FRONTEND] App mounted!");
-    console.log("[FRONTEND] invoke function:", invoke);
-    console.log("[FRONTEND] listen function:", listen);
-    
-    // Check if Tauri API is available
-    if (!invoke || !listen) {
-      setIsTauriAvailable(false);
-      addDebugLog("⚠️ NOT RUNNING IN TAURI! Open the app window, not browser.");
-      console.error("[FRONTEND] Tauri API not available!");
-      return;
-    }
-    
-    console.log("[FRONTEND] Setting up event listeners...");
-    addDebugLog("🔧 Setting up event listeners...");
-    
-    const unlistenProposed = listen("file-proposed", (event: any) => {
-      console.log("[FRONTEND] ✅ RECEIVED file-proposed event!", event);
-      console.log("[FRONTEND] Payload:", event.payload);
-      addDebugLog(`✅ PROPOSAL: "${event.payload.proposed_name}" → ${event.payload.proposed_category}`);
-      addDebugLog(`💭 Reasoning: ${event.payload.reasoning}`);
-      setProposals((prev) => [event.payload, ...prev]);
+    if (!invoke || !listen) return;
+
+    const u1 = listen("scan-summary", (e: any) => {
+      setTotalFiles(e.payload as number);
+      setProcessedFiles(0);
     });
 
-    const unlistenProcessing = listen("file-processing", (event: any) => {
-      console.log("[FRONTEND] 🔍 RECEIVED file-processing event!", event);
-      console.log("[FRONTEND] Payload:", event.payload);
-      addDebugLog(`🔍 DETECTED: ${event.payload}`);
-      addDebugLog(`📡 Sending to Claude API...`);
-      setStatusMsg(`Analyzing ${event.payload}...`);
-      setTimeout(() => setStatusMsg(""), 3000);
+    const u2 = listen("file-proposed", (e: any) => {
+      const proposal = { ...e.payload, selected: true };
+      setProposals(prev => [...prev, proposal]);
+      setProcessedFiles(prev => prev + 1);
+      // Auto-select first category
+      if (!selectedCategory) {
+        setSelectedCategory(e.payload.proposed_category);
+      }
     });
 
-    console.log("[FRONTEND] Event listeners registered!");
-    addDebugLog("✅ Event listeners ready!");
+    return () => { u1.then(f => f()); u2.then(f => f()); };
+  }, [selectedCategory]);
 
-    return () => {
-      unlistenProposed.then((f) => f());
-      unlistenProcessing.then((f) => f());
-    };
-  }, []);
-
-  async function toggleWatch() {
-    console.log("[FRONTEND] toggleWatch called");
-    console.log("[FRONTEND] typeof invoke:", typeof invoke);
-    
-    if (!invoke) {
-      const errorMsg = "Tauri invoke API is not available. Are you running in a Tauri app?";
-      console.error("[FRONTEND]", errorMsg);
-      addDebugLog(`❌ ${errorMsg}`);
-      alert(errorMsg);
-      return;
-    }
-    
-    if (isWatching) {
-      console.log("[FRONTEND] Stopping watch...");
+  async function startScan() {
+    if (isScanning) {
       await invoke("stop_watch");
-      setIsWatching(false);
-      addDebugLog("⏹️ STOPPED watching");
+      setIsScanning(false);
+      setTotalFiles(0);
     } else {
       try {
-        console.log("[FRONTEND] Starting watch...");
-        console.log("[FRONTEND] Path:", path);
-        console.log("[FRONTEND] API Key length:", apiKey.length);
-        addDebugLog(`🚀 Calling start_watch...`);
-        
-        const result = await invoke("start_watch", { path, apiKey });
-        console.log("[FRONTEND] start_watch returned:", result);
-        
-        setIsWatching(true);
-        addDebugLog(`▶️ STARTED watching: ${path}`);
-        addDebugLog(`📂 Waiting for screenshot files...`);
+        setProposals([]);
+        setSelectedCategory(null);
+        await invoke("start_watch", { path, apiKey });
+        setIsScanning(true);
       } catch (e) {
         alert("Error: " + e);
-        addDebugLog(`❌ ERROR: ${e}`);
-        console.error("[FRONTEND] Error:", e);
       }
     }
   }
 
-  async function handleAction(proposal: FileProposal, approve: boolean) {
-    if (approve) {
-      addDebugLog(`✅ USER APPROVED: ${proposal.proposed_name}`);
-      const parentDir = proposal.original_path.substring(0, proposal.original_path.lastIndexOf('/'));
-      const newPath = `${parentDir}/${proposal.proposed_category}/${proposal.proposed_name}`;
+  function toggleFileSelection(id: string) {
+    setProposals(prev => prev.map(p => 
+      p.id === id ? { ...p, selected: !p.selected } : p
+    ));
+  }
 
+  function toggleCategorySelection(category: string) {
+    const allSelected = categories[category].every(p => p.selected);
+    setProposals(prev => prev.map(p => 
+      p.proposed_category === category ? { ...p, selected: !allSelected } : p
+    ));
+  }
+
+  function startEdit(file: FileProposal) {
+    setEditingFile(file);
+    setEditName(file.proposed_name);
+    setEditCategory(file.proposed_category);
+  }
+
+  function saveEdit() {
+    if (!editingFile) return;
+    setProposals(prev => prev.map(p => 
+      p.id === editingFile.id 
+        ? { ...p, proposed_name: editName, proposed_category: editCategory }
+        : p
+    ));
+    // If category changed, update selected category
+    if (editCategory !== editingFile.proposed_category) {
+      setSelectedCategory(editCategory);
+    }
+    setEditingFile(null);
+  }
+
+  async function acceptAll() {
+    const selectedFiles = proposals.filter(p => p.selected);
+    for (const p of selectedFiles) {
+      const parentDir = p.original_path.substring(0, p.original_path.lastIndexOf('/'));
+      const newPath = `${parentDir}/${p.proposed_category}/${p.proposed_name}`;
       try {
-        await invoke("execute_action", {
-          originalPath: proposal.original_path,
-          newPath: newPath
-        });
-
-        addDebugLog(`📁 MOVED: ${proposal.original_path} → ${newPath}`);
-        setLogs(prev => [{
-          original: proposal.original_name,
-          new: proposal.proposed_name,
-          category: proposal.proposed_category,
-          status: "Success",
-          timestamp: new Date().toLocaleTimeString()
-        }, ...prev]);
+        await invoke("execute_action", { originalPath: p.original_path, newPath });
       } catch (e) {
-        alert("Failed to move: " + e);
-        addDebugLog(`❌ MOVE FAILED: ${e}`);
-        return;
+        console.error("Move failed:", e);
       }
-    } else {
-      addDebugLog(`🚫 USER REJECTED: ${proposal.original_name}`);
     }
-    setProposals(prev => prev.filter(p => p.id !== proposal.id));
+    setProposals(prev => prev.filter(p => !p.selected));
+    setSelectedCategory(null);
   }
+
+  const isLoading = isScanning && processedFiles < totalFiles;
+  const hasResults = proposals.length > 0;
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans p-8">
-      {!isTauriAvailable && (
-        <div className="max-w-2xl mx-auto mb-4 bg-red-100 border-2 border-red-500 text-red-900 px-6 py-4 rounded-2xl">
-          <h2 className="font-bold text-lg mb-2">⚠️ Not Running in Tauri App</h2>
-          <p className="text-sm">
-            You're viewing this in a regular web browser. The app will NOT work here!
-            <br />
-            <strong>Look for the native app window that opened when you ran `npm run tauri dev`</strong>
-          </p>
-        </div>
-      )}
-      
-      <div className="max-w-2xl mx-auto space-y-8">
+    <div className="h-screen bg-[#0c0c0d] text-white font-['Inter',system-ui,sans-serif] flex flex-col overflow-hidden">
 
         {/* Header */}
-        <div className="flex items-center justify-between">
+      <header className="shrink-0 border-b border-white/5 bg-[#111113]">
+        <div className="px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-3 bg-blue-600 rounded-2xl shadow-lg shadow-blue-500/20">
-              <Ghost className="w-8 h-8 text-white" />
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-600 flex items-center justify-center">
+              <Sparkles className="w-4 h-4 text-white" />
             </div>
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight text-gray-900">Smart Dump</h1>
-              <p className="text-sm text-gray-500 font-medium">Review Queue</p>
-            </div>
-          </div>
-          <div className={`px-3 py-1 rounded-full text-xs font-semibold ${isWatching ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-500"}`}>
-            {isWatching ? "WATCHING" : "IDLE"}
-          </div>
+            <h1 className="text-base font-semibold">Smart Dump</h1>
         </div>
 
-        {/* Controls Card */}
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 space-y-5">
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <FolderOpen className="absolute left-3 top-3 w-5 h-5 text-gray-400" />
+          {/* Config inputs */}
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <FolderOpen className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
               <input
-                type="text"
                 value={path}
-                onChange={(e) => setPath(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all font-mono text-xs"
+                onChange={e => setPath(e.target.value)}
+                className="w-64 bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm font-mono focus:outline-none focus:border-violet-500/50 transition-colors"
+                placeholder="Folder path"
               />
             </div>
-            <div className="relative flex-1">
-              <Settings className="absolute left-3 top-3 w-5 h-5 text-gray-400" />
+            <div className="relative">
+              <Settings className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
               <input
                 type="password"
                 value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
+                onChange={e => setApiKey(e.target.value)}
+                className="w-48 bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm font-mono focus:outline-none focus:border-violet-500/50 transition-colors"
                 placeholder="API Key"
-                className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all font-mono text-xs"
               />
-            </div>
           </div>
           <button
-            onClick={toggleWatch}
-            className={`w-full py-3 rounded-xl font-bold text-white shadow-lg transition-all transform active:scale-95 flex items-center justify-center gap-2
-              ${isWatching
-                ? "bg-red-500 hover:bg-red-600 shadow-red-500/25"
-                : "bg-gray-900 hover:bg-black shadow-gray-900/25"
+              onClick={startScan}
+              disabled={!apiKey}
+              className={`px-4 py-2 rounded-lg font-medium text-sm transition-all flex items-center gap-2 ${
+                isScanning 
+                  ? 'bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30' 
+                  : 'bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed'
               }`}
-          >
-            {isWatching ? "Stop Watching" : "Start Watching"}
+            >
+              {isScanning ? 'Stop' : 'Scan'}
           </button>
+          </div>
         </div>
 
-        {/* Pending Proposals */}
-        {proposals.length > 0 && (
-          <div className="space-y-4">
-            <h2 className="text-sm font-bold text-blue-600 uppercase tracking-wider flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" /> Pending Approval ({proposals.length})
-            </h2>
-            {proposals.map((p) => (
-              <div key={p.id} className="bg-white p-5 rounded-3xl shadow-lg ring-1 ring-blue-100 relative overflow-hidden">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <div className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-1">Found Screenshot</div>
-                    <div className="font-mono text-sm text-gray-600 truncate max-w-[200px]">{p.original_name}</div>
-                  </div>
-                  <ArrowRight className="w-5 h-5 text-gray-300 mt-4" />
-                  <div className="text-right">
-                    <div className="text-xs font-bold text-blue-500 uppercase tracking-wide mb-1">Proposal</div>
-                    <div className="font-bold text-gray-900">{p.proposed_name}</div>
-                    <div className="text-xs text-gray-500 mt-1">in <span className="font-semibold text-gray-700">{p.proposed_category}</span></div>
-                  </div>
-                </div>
-
-                <div className="bg-blue-50/50 p-3 rounded-xl text-xs text-blue-700 mb-4 italic">
-                  "{p.reasoning}"
-                </div>
-
-                <div className="flex gap-3">
-                  <button onClick={() => handleAction(p, false)} className="flex-1 py-2 rounded-xl border border-gray-200 font-semibold text-gray-500 hover:bg-gray-50 transition-colors">
-                    Reject
-                  </button>
-                  <button onClick={() => handleAction(p, true)} className="flex-1 py-2 rounded-xl bg-blue-600 font-semibold text-white shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-colors">
-                    Approve
-                  </button>
-                </div>
-              </div>
-            ))}
+        {/* Progress bar */}
+        {isLoading && (
+          <div className="h-1 bg-white/5">
+            <div 
+              className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+              style={{ width: `${(processedFiles / totalFiles) * 100}%` }}
+            />
           </div>
         )}
+      </header>
 
-        {/* Debug Log */}
-        <div className="bg-black text-green-400 rounded-2xl p-5 font-mono text-xs overflow-hidden">
-          <h2 className="text-sm font-bold uppercase tracking-wider mb-3 text-green-300">🔍 Live Activity Log</h2>
-          <div className="space-y-1 max-h-64 overflow-y-auto">
-            {debugLog.length === 0 ? (
-              <div className="text-gray-500 italic">Waiting for events...</div>
-            ) : (
-              debugLog.map((log, i) => (
-                <div key={i} className="leading-relaxed">{log}</div>
-              ))
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden">
+        
+        {/* Left Sidebar - Categories/Folders */}
+        <aside className="w-64 border-r border-white/5 bg-[#0f0f11] flex flex-col">
+          <div className="p-4 border-b border-white/5">
+            <h2 className="text-xs font-semibold text-white/40 uppercase tracking-wider">
+              Folders to Create
+            </h2>
+          </div>
+          
+          <div className="flex-1 overflow-auto p-2">
+            {!hasResults && !isLoading && (
+              <div className="p-4 text-center text-white/30 text-sm">
+                <FolderPlus className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p>No folders yet</p>
+                <p className="text-xs mt-1">Click Scan to analyze screenshots</p>
+              </div>
             )}
+            
+            {isLoading && !hasResults && (
+              <div className="p-4 text-center text-white/40 text-sm">
+                <Loader2 className="w-6 h-6 mx-auto mb-2 animate-spin" />
+                <p>Analyzing screenshots...</p>
+              </div>
+            )}
+            
+            {categoryList.map(category => {
+              const files = categories[category];
+              const selectedInCategory = files.filter(f => f.selected).length;
+              const isSelected = selectedCategory === category;
+              
+              return (
+                <button
+                  key={category}
+                  onClick={() => setSelectedCategory(category)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all mb-1 group ${
+                    isSelected 
+                      ? 'bg-violet-500/20 text-white' 
+                      : 'hover:bg-white/5 text-white/70'
+                  }`}
+                >
+                  <Folder className={`w-4 h-4 ${isSelected ? 'text-violet-400' : 'text-white/40'}`} />
+                  <span className="flex-1 text-sm font-medium truncate">{category}</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    isSelected ? 'bg-violet-500/30 text-violet-300' : 'bg-white/10 text-white/50'
+                  }`}>
+                    {selectedInCategory}/{files.length}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          
+          {/* Accept All Button */}
+          {hasResults && (
+            <div className="p-4 border-t border-white/5">
+              <button
+                onClick={acceptAll}
+                disabled={selectedCount === 0}
+                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 font-semibold text-sm shadow-lg shadow-violet-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                <Check className="w-4 h-4" />
+                Accept All ({selectedCount})
+              </button>
+              <p className="text-xs text-white/30 text-center mt-2">
+                {categoryList.length} folders • {totalCount} files
+              </p>
+            </div>
+          )}
+        </aside>
+
+        {/* Middle Panel - Files in Category */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-[#0c0c0d]">
+          {selectedCategory ? (
+            <>
+              {/* Category Header */}
+              <div className="shrink-0 px-6 py-4 border-b border-white/5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Folder className="w-5 h-5 text-violet-400" />
+                  <h2 className="text-lg font-semibold">{selectedCategory}</h2>
+                  <span className="text-sm text-white/40">
+                    {filesInSelectedCategory.length} files
+                  </span>
+                </div>
+                <button
+                  onClick={() => toggleCategorySelection(selectedCategory)}
+                  className="text-sm text-white/50 hover:text-white flex items-center gap-2 transition-colors"
+                >
+                  {filesInSelectedCategory.every(f => f.selected) ? (
+                    <>
+                      <Circle className="w-4 h-4" />
+                      Deselect all
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      Select all
+                    </>
+                  )}
+                </button>
+              </div>
+              
+              {/* Files List */}
+              <div className="flex-1 overflow-auto p-4">
+                <div className="space-y-2">
+                  {filesInSelectedCategory.map(file => (
+                    <div
+                      key={file.id}
+                      className={`flex items-center gap-4 p-3 rounded-xl border transition-all cursor-pointer ${
+                        file.selected 
+                          ? 'bg-white/5 border-white/10' 
+                          : 'bg-white/[0.02] border-transparent opacity-50'
+                      } ${previewFile?.id === file.id ? 'ring-2 ring-violet-500/50' : ''}`}
+                      onClick={() => setPreviewFile(file)}
+                    >
+                      {/* Checkbox */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleFileSelection(file.id); }}
+                        className="shrink-0"
+                      >
+                        {file.selected ? (
+                          <CheckCircle2 className="w-5 h-5 text-violet-400" />
+                        ) : (
+                          <Circle className="w-5 h-5 text-white/30" />
+                        )}
+                      </button>
+                      
+                      {/* Thumbnail */}
+                      <div className="w-16 h-12 rounded-lg bg-black/50 overflow-hidden shrink-0">
+                        <img 
+                          src={convertFileSrc(file.original_path)}
+                          alt=""
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      
+                      {/* File info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm truncate">{file.proposed_name}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-white/40 mt-0.5">
+                          <span className="truncate">{file.original_name}</span>
+                          <ArrowRight className="w-3 h-3 shrink-0" />
+                          <span className="text-violet-400">{file.proposed_category}/</span>
+                        </div>
+                      </div>
+                      
+                      {/* Edit button */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); startEdit(file); }}
+                        className="p-2 rounded-lg hover:bg-white/10 text-white/40 hover:text-white transition-colors shrink-0"
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-white/30">
+              <div className="text-center">
+                <Folder className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                <p>Select a folder to view files</p>
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* Right Panel - Preview */}
+        {previewFile && (
+          <aside className="w-96 border-l border-white/5 bg-[#0f0f11] flex flex-col">
+            <div className="p-4 border-b border-white/5 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white/60">Preview</h3>
+              <button
+                onClick={() => setPreviewFile(null)}
+                className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-auto p-4">
+              {/* Large preview */}
+              <div className="rounded-xl overflow-hidden bg-black/50 mb-4">
+                <img 
+                  src={convertFileSrc(previewFile.original_path)}
+                  alt=""
+                  className="w-full"
+                />
+              </div>
+              
+              {/* File details */}
+              <div className="space-y-4">
+                  <div>
+                  <label className="text-xs text-white/40 uppercase tracking-wider">Original</label>
+                  <p className="text-sm font-mono text-white/70 mt-1 break-all">{previewFile.original_name}</p>
+                  </div>
+                
+                <div className="flex items-center gap-2 text-white/30">
+                  <div className="flex-1 h-px bg-white/10" />
+                  <ArrowRight className="w-4 h-4" />
+                  <div className="flex-1 h-px bg-white/10" />
+                  </div>
+                
+                <div>
+                  <label className="text-xs text-white/40 uppercase tracking-wider">New Name</label>
+                  <p className="text-sm font-semibold mt-1">{previewFile.proposed_name}</p>
+                </div>
+
+                <div>
+                  <label className="text-xs text-white/40 uppercase tracking-wider">Folder</label>
+                  <p className="text-sm text-violet-400 mt-1">{previewFile.proposed_category}/</p>
+                </div>
+
+                <div>
+                  <label className="text-xs text-white/40 uppercase tracking-wider">Reasoning</label>
+                  <p className="text-sm text-white/60 mt-1 italic">"{previewFile.reasoning}"</p>
+                </div>
+                
+                <button
+                  onClick={() => startEdit(previewFile)}
+                  className="w-full py-2 px-4 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                >
+                  <Pencil className="w-4 h-4" />
+                  Edit
+                </button>
+              </div>
+          </div>
+          </aside>
+        )}
+      </div>
+
+      {/* Edit Modal */}
+      {editingFile && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-[#18181b] rounded-2xl border border-white/10 w-full max-w-md p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold mb-4">Edit File</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs text-white/40 uppercase tracking-wider">File Name</label>
+                <input
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
+                  className="w-full mt-2 bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-violet-500/50 transition-colors"
+                />
+              </div>
+              
+              <div>
+                <label className="text-xs text-white/40 uppercase tracking-wider">Category / Folder</label>
+                <input
+                  value={editCategory}
+                  onChange={e => setEditCategory(e.target.value)}
+                  className="w-full mt-2 bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-violet-500/50 transition-colors"
+                />
+              </div>
+              
+              {/* Existing categories */}
+              {categoryList.length > 0 && (
+                <div>
+                  <label className="text-xs text-white/40 uppercase tracking-wider mb-2 block">Or choose existing</label>
+                  <div className="flex flex-wrap gap-2">
+                    {categoryList.map(cat => (
+                      <button
+                        key={cat}
+                        onClick={() => setEditCategory(cat)}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                          editCategory === cat 
+                            ? 'bg-violet-500/30 text-violet-300 border border-violet-500/50' 
+                            : 'bg-white/5 text-white/60 border border-white/10 hover:bg-white/10'
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+        </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setEditingFile(null)}
+                className="flex-1 py-2.5 px-4 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 font-medium text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEdit}
+                className="flex-1 py-2.5 px-4 rounded-lg bg-violet-600 hover:bg-violet-500 font-medium text-sm transition-colors"
+              >
+                Save Changes
+              </button>
+            </div>
           </div>
         </div>
-
-        {/* Logs */}
-        <div className="space-y-4 opacity-60 hover:opacity-100 transition-opacity">
-          <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider">History</h2>
-          {logs.map((log, i) => (
-            <div key={i} className="flex items-center justify-between text-xs text-gray-500 border-b border-gray-100 pb-2">
-              <span>{log.original} &rarr; {log.new}</span>
-              <span className="font-mono">{log.timestamp}</span>
-            </div>
-          ))}
-        </div>
-
-      </div>
+      )}
     </div>
   );
 }
 
-// End of App
 export default App;
