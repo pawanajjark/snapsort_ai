@@ -306,6 +306,7 @@ fn stop_watch(state: State<WatcherState>) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(WatcherState {
             watcher: Mutex::new(None),
             api_key: Mutex::new(String::new()),
