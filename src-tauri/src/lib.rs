@@ -69,6 +69,17 @@ struct FolderInfo {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct SummaryRequest {
+    total: u32,
+    processed: u32,
+    skipped: u32,
+    conflicts: u32,
+    folders: u32,
+    duration_seconds: u32,
+    top_categories: Vec<(String, u32)>,
+}
+
 #[derive(Serialize)]
 struct MoveResult {
     original_path: String,
@@ -586,6 +597,58 @@ fn check_existing_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn get_scan_summary(request: SummaryRequest, api_key: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let categories = request
+        .top_categories
+        .iter()
+        .map(|(name, count)| format!("{} ({})", name, count))
+        .collect::<Vec<String>>()
+        .join(", ");
+
+    let prompt = format!(
+        "Write a 2-3 sentence, friendly summary of this screenshot organization run. \
+         Keep it concise, helpful, and warm (no hype). \
+         Stats: processed {processed} of {total}, skipped {skipped}, conflicts {conflicts}, \
+         folders {folders}, duration {duration}s. \
+         Top categories: {categories}.",
+        processed = request.processed,
+        total = request.total,
+        skipped = request.skipped,
+        conflicts = request.conflicts,
+        folders = request.folders,
+        duration = request.duration_seconds,
+        categories = categories
+    );
+
+    let request_body = serde_json::json!({
+        "model": "claude-opus-4-5-20251101",
+        "max_tokens": 200,
+        "messages": [{
+            "role": "user",
+            "content": [{ "type": "text", "text": prompt }]
+        }]
+    });
+
+    let res = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    if let Some(content) = json["content"][0]["text"].as_str() {
+        return Ok(content.trim().to_string());
+    }
+
+    Err("Failed to generate summary".to_string())
+}
+
+#[tauri::command]
 async fn get_subcategory(
     file_path: String,
     parent_category: String,
@@ -716,7 +779,8 @@ pub fn run() {
             get_subcategory,
             list_folder_screenshots,
             list_subfolders,
-            check_existing_paths
+            check_existing_paths,
+            get_scan_summary
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -20,6 +20,7 @@ interface PreviewGridProps {
   isReadOnly?: boolean;
   processedFiles?: Set<string>;
   hideProcessed?: boolean;
+  showProcessedBadge?: boolean;
 }
 
 export function PreviewGrid({
@@ -32,6 +33,7 @@ export function PreviewGrid({
   isReadOnly = false,
   processedFiles,
   hideProcessed = false,
+  showProcessedBadge = true,
 }: PreviewGridProps) {
   const visibleFiles = hideProcessed && processedFiles
     ? files.filter(f => !processedFiles.has(f.path))
@@ -108,6 +110,7 @@ export function PreviewGrid({
               }}
               isReadOnly={isReadOnly}
               isProcessed={processedFiles?.has(file.path) ?? false}
+              showProcessedBadge={showProcessedBadge}
             />
           ))}
         </div>
@@ -130,6 +133,7 @@ function PreviewThumbnail({
   onToggle,
   isReadOnly,
   isProcessed,
+  showProcessedBadge,
 }: {
   file: FileInfo;
   index: number;
@@ -137,6 +141,7 @@ function PreviewThumbnail({
   onToggle: () => void;
   isReadOnly: boolean;
   isProcessed: boolean;
+  showProcessedBadge: boolean;
 }) {
   const [loaded, setLoaded] = useState(false);
   const previewKey = encodeURIComponent(file.path);
@@ -157,8 +162,6 @@ function PreviewThumbnail({
         border-2 transition-all duration-150
         ${!file.is_valid 
           ? "opacity-40 cursor-not-allowed border-amber-500/30" 
-          : isProcessed
-            ? "opacity-20 border-transparent"
           : isSelected 
             ? "border-white/40 ring-2 ring-white/20" 
             : isReadOnly
@@ -194,6 +197,12 @@ function PreviewThumbnail({
         >
           <Check className="w-3.5 h-3.5 text-black" strokeWidth={3} />
         </motion.div>
+      )}
+
+      {showProcessedBadge && isProcessed && (
+        <div className="absolute bottom-2 left-2 w-5 h-5 rounded-full bg-white/80 text-black flex items-center justify-center">
+          <Check className="w-3 h-3" strokeWidth={3} />
+        </div>
       )}
 
       {/* Unselected circle indicator */}

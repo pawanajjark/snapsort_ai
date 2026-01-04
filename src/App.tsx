@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Loader2, Check, Sparkles, FolderOpen, AlertTriangle } from "lucide-react";
+import { Settings, Loader2, Check, Layers, FolderOpen, AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { FolderTree, buildFolderTree, type FolderNode } from "@/components/FolderTree";
@@ -38,6 +38,14 @@ interface SkippedFile {
   reason: string;
 }
 
+interface ActivityEvent {
+  id: string;
+  type: "proposed" | "skipped" | "failed" | "info";
+  title: string;
+  detail?: string;
+  time: number;
+}
+
 interface MoveResult {
   original_path: string;
   final_path: string;
@@ -48,6 +56,15 @@ interface MoveRecord {
   proposal: FileProposal;
   moved_path: string;
   renamed: boolean;
+}
+
+interface ScanSummary {
+  total: number;
+  processed: number;
+  skipped: number;
+  conflicts: number;
+  foldersCreated: number;
+  durationMs: number;
 }
 
 function App() {
@@ -88,6 +105,13 @@ function App() {
   const [overwriteIds, setOverwriteIds] = useState<Set<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  const [scanStartedAt, setScanStartedAt] = useState<number | null>(null);
+  const [summary, setSummary] = useState<ScanSummary | null>(null);
+  const [showSummaryMain, setShowSummaryMain] = useState(false);
+  const [showHome, setShowHome] = useState(true);
+  const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [isSummaryLoading, setIsSummaryLoading] = useState(false);
 
   // Animation state for file movement
   const [exitingFileIds, setExitingFileIds] = useState<Set<string>>(new Set());
@@ -136,14 +160,41 @@ function App() {
   const selectedCount = proposals.filter(p => p.selected).length;
   const totalCount = proposals.length;
   const conflictIds = useMemo(() => new Set(conflicts.map(c => c.id)), [conflicts]);
+  const folderCount = useMemo(() => {
+    const top = new Set(proposals.map(p => p.proposed_category.split("/")[0]));
+    return top.size;
+  }, [proposals]);
+  const topCategories = useMemo(() => {
+    const counts: Record<string, number> = {};
+    proposals.forEach((p) => {
+      const top = p.proposed_category.split("/")[0];
+      counts[top] = (counts[top] || 0) + 1;
+    });
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+  }, [proposals]);
 
   // Event listeners
   useEffect(() => {
     if (!invoke || !listen) return;
 
+    const pushActivity = (event: ActivityEvent) => {
+      setActivityEvents(prev => {
+        const next = [event, ...prev];
+        return next.slice(0, 120);
+      });
+    };
+
     const u1 = listen("scan-summary", (e: any) => {
       setTotalFiles(e.payload as number);
       setProcessedFiles(0);
+      pushActivity({
+        id: `summary-${Date.now()}`,
+        type: "info",
+        title: `Scanning ${e.payload} files`,
+        time: Date.now(),
+      });
     });
 
     const u2 = listen("file-proposed", (e: any) => {
@@ -161,12 +212,26 @@ function App() {
         next.add(proposal.original_path);
         return next;
       });
+      pushActivity({
+        id: `proposed-${proposal.id}-${Date.now()}`,
+        type: "proposed",
+        title: proposal.proposed_name,
+        detail: proposal.proposed_category,
+        time: Date.now(),
+      });
     });
 
     const u3 = listen("file-skipped", (e: any) => {
       const skipped = e.payload as SkippedFile;
       setSkippedFiles(prev => [...prev, skipped]);
       setShowSkippedNotice(true);
+      pushActivity({
+        id: `skipped-${skipped.name}-${Date.now()}`,
+        type: "skipped",
+        title: skipped.name,
+        detail: skipped.reason,
+        time: Date.now(),
+      });
       // Auto-hide notice after 3 seconds
       setTimeout(() => setShowSkippedNotice(false), 3000);
     });
@@ -177,6 +242,35 @@ function App() {
       u3.then(f => f());
     };
   }, []);
+
+  useEffect(() => {
+    if (!summary || !showSummaryMain || isSummaryLoading || summaryText || !apiKey) return;
+
+    const fetchSummary = async () => {
+      setIsSummaryLoading(true);
+      try {
+        const text = await invoke<string>("get_scan_summary", {
+          request: {
+            total: summary.total,
+            processed: summary.processed,
+            skipped: summary.skipped,
+            conflicts: summary.conflicts,
+            folders: summary.foldersCreated,
+            durationSeconds: Math.round(summary.durationMs / 1000),
+                            topCategories: topCategories.map(([name, count]) => [name, count]),
+          },
+          apiKey,
+        });
+        setSummaryText(text);
+      } catch (e) {
+        setSummaryText(null);
+      } finally {
+        setIsSummaryLoading(false);
+      }
+    };
+
+    fetchSummary();
+  }, [summary, showSummaryMain, isSummaryLoading, summaryText, apiKey, topCategories]);
 
   useEffect(() => {
     if (!isResizingSidebar) return;
@@ -205,6 +299,18 @@ function App() {
     const u4 = listen("file-failed", (e: any) => {
       console.log("File processing failed:", e.payload);
       setProcessedFiles(prev => prev + 1);
+      setActivityEvents(prev => {
+        const next = [
+          {
+            id: `failed-${Date.now()}`,
+            type: "failed",
+            title: String(e.payload),
+            time: Date.now(),
+          },
+          ...prev,
+        ];
+        return next.slice(0, 120);
+      });
     });
     return () => {
       u4.then(f => f());
@@ -325,11 +431,18 @@ function App() {
         setShowConflictDialog(false);
         setOverwriteIds(new Set());
         setProcessedPreviewPaths(new Set());
+        setActivityEvents([]);
+        setSummary(null);
+        setShowSummaryMain(false);
+        setShowHome(false);
+        setSummaryText(null);
+        setIsSummaryLoading(false);
         setHasScanned(true);
         setHasOptimized(false); // Reset optimization flag
         if (options?.path && options.path !== path) {
           setPath(options.path);
         }
+        setScanStartedAt(Date.now());
         await invoke("start_watch", {
           path: scanPath,
           apiKey,
@@ -358,6 +471,13 @@ function App() {
     setShowConflictDialog(false);
     setOverwriteIds(new Set());
     setProcessedPreviewPaths(new Set());
+    setActivityEvents([]);
+    setSummary(null);
+    setShowSummaryMain(false);
+    setScanStartedAt(null);
+    setShowHome(true);
+    setSummaryText(null);
+    setIsSummaryLoading(false);
     loadPreviewFiles();
   }
 
@@ -412,6 +532,23 @@ function App() {
       console.log("[APP] All files processed, stopping scan");
       invoke("stop_watch").catch(console.error);
       setIsScanning(false);
+    }
+
+    if (scanStartedAt && !summary) {
+      const elapsed = Date.now() - scanStartedAt;
+      const total = totalFiles;
+      const skipped = skippedFiles.length;
+      const uniqueFolders = new Set(proposals.map(p => p.proposed_category.split("/")[0]));
+      const conflictsCount = conflicts.length;
+      setSummary({
+        total,
+        processed: processedFiles,
+        skipped,
+        conflicts: conflictsCount,
+        foldersCreated: uniqueFolders.size,
+        durationMs: elapsed,
+      });
+      setShowSummaryMain(true);
     }
 
     // Don't run optimization if already done
@@ -660,15 +797,20 @@ function App() {
       <header className="shrink-0 h-14 flex items-center justify-between px-5 border-b border-white/5 bg-[var(--bg-secondary)]">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center">
-            <Sparkles className="w-4 h-4 text-black" />
+            <Layers className="w-4 h-4 text-black" />
           </div>
           <div>
-            <h1 className="text-[14px] font-semibold">Smart Dump</h1>
+            <h1 className="text-[14px] font-semibold">SnapSort</h1>
             <p className="text-[11px] text-white/40 font-mono">{path}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
+          {isScanInProgress && (
+            <div className="px-2.5 py-1 rounded-full text-[11px] text-white/70 bg-white/10 border border-white/10">
+              Scanning {processedFiles}/{totalFiles}
+            </div>
+          )}
           <motion.button
             onClick={() => setShowFolderPicker(true)}
             className="p-2 rounded-lg hover:bg-white/5 text-white/50 hover:text-white/70"
@@ -706,7 +848,7 @@ function App() {
               </>
             ) : !hasScanned ? (
               <>
-                <Sparkles className="w-4 h-4 mr-2" />
+                <Layers className="w-4 h-4 mr-2" />
                 Scan {selectedPreviews.size} Files
               </>
             ) : (
@@ -797,22 +939,107 @@ function App() {
         )}
       </AnimatePresence>
 
+      
+
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Show PreviewGrid before scanning, Folder view after */}
         {!hasScanned ? (
-          // Pre-scan view - show thumbnail grid
+          // Pre-scan view - home screen
           <main className="flex-1 flex flex-col overflow-hidden bg-[var(--bg-primary)]">
-            <PreviewGrid
-              files={previewFiles}
-              isLoading={isLoadingPreviews}
-              selectedFiles={selectedPreviews}
-              onToggleSelect={togglePreviewSelect}
-              onSelectAll={selectAllPreviews}
-              onDeselectAll={deselectAllPreviews}
-              processedFiles={processedPreviewPaths}
-              hideProcessed={isScanning}
-            />
+            {showHome ? (
+              <div className="flex-1 flex items-center justify-center">
+                <div className="max-w-5xl w-full px-8">
+                  <div className="grid grid-cols-1 md:grid-cols-[1.1fr_0.9fr] gap-10 items-center">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.3em] text-white/35">
+                        Precision file organization
+                      </p>
+                      <h2 className="text-[30px] leading-tight font-semibold text-white mt-3">
+                        SnapSort turns screenshot chaos into a clean library.
+                      </h2>
+                      <p className="text-[14px] text-white/65 mt-4 leading-relaxed">
+                        Drop a folder, review the preview, and accept a tidy structure you can search
+                        later. No surprises, just confident moves.
+                      </p>
+                      <div className="mt-7 flex items-center gap-3">
+                        <Button
+                          onClick={() => setShowFolderPicker(true)}
+                          className="bg-white text-black hover:bg-white/90"
+                        >
+                          Choose Folder
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => setShowHome(false)}
+                          className="border-white/10 bg-transparent text-white/70 hover:bg-white/5"
+                        >
+                          Preview screenshots
+                        </Button>
+                      </div>
+                      <div className="mt-6 flex items-center gap-6 text-[11px] text-white/40">
+                        <span className="flex items-center gap-2">
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-white/30" />
+                          Auto rename
+                        </span>
+                        <span className="flex items-center gap-2">
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-white/30" />
+                          Smart categories
+                        </span>
+                        <span className="flex items-center gap-2">
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-white/30" />
+                          Safe moves
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-[var(--bg-secondary)]/70 p-5">
+                      <div className="flex items-center justify-between text-[11px] text-white/40">
+                        <span>Preview</span>
+                        <span className="font-mono">0 selected</span>
+                      </div>
+                      <div className="mt-4 space-y-3">
+                        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                          <div className="flex items-center justify-between">
+                            <div className="h-2 w-28 rounded-full bg-white/10" />
+                            <div className="h-2 w-10 rounded-full bg-white/5" />
+                          </div>
+                          <div className="mt-3 h-16 rounded-lg bg-gradient-to-br from-white/10 to-transparent border border-white/5" />
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                          <div className="flex items-center justify-between">
+                            <div className="h-2 w-24 rounded-full bg-white/10" />
+                            <div className="h-2 w-12 rounded-full bg-white/5" />
+                          </div>
+                          <div className="mt-3 h-16 rounded-lg bg-gradient-to-br from-white/10 to-transparent border border-white/5" />
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                          <div className="flex items-center justify-between">
+                            <div className="h-2 w-32 rounded-full bg-white/10" />
+                            <div className="h-2 w-8 rounded-full bg-white/5" />
+                          </div>
+                          <div className="mt-3 h-16 rounded-lg bg-gradient-to-br from-white/10 to-transparent border border-white/5" />
+                        </div>
+                      </div>
+                      <div className="mt-4 text-[11px] text-white/35">
+                        Review before moving. One click to accept the new structure.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <PreviewGrid
+                files={previewFiles}
+                isLoading={isLoadingPreviews}
+                selectedFiles={selectedPreviews}
+                onToggleSelect={togglePreviewSelect}
+                onSelectAll={selectAllPreviews}
+                onDeselectAll={deselectAllPreviews}
+                processedFiles={processedPreviewPaths}
+                hideProcessed={false}
+              />
+            )}
           </main>
         ) : (
           <>
@@ -919,7 +1146,103 @@ function App() {
               )}
 
               <div className="flex-1 overflow-hidden">
-                {hasResults && !isScanInProgress ? (
+                {isScanInProgress ? (
+                  <PreviewGrid
+                    files={previewFiles}
+                    isLoading={isLoadingPreviews}
+                    selectedFiles={selectedPreviews}
+                    onToggleSelect={togglePreviewSelect}
+                    onSelectAll={selectAllPreviews}
+                    onDeselectAll={deselectAllPreviews}
+                    isReadOnly
+                    processedFiles={processedPreviewPaths}
+                    hideProcessed
+                    showProcessedBadge={false}
+                  />
+                ) : showSummaryMain && summary ? (
+                  <div className="h-full flex flex-col">
+                    <div className="flex-1 overflow-y-auto p-8">
+                      <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-white/10 via-white/[0.04] to-transparent p-6">
+                        <p className="text-[11px] uppercase tracking-wider text-white/40">
+                          AI Summary
+                        </p>
+                        <h2 className="text-[22px] text-white font-semibold mt-2">
+                          Your screenshots are organized.
+                        </h2>
+                        <p className="text-[13px] text-white/60 mt-1">
+                          {summary.processed} files sorted into {summary.foldersCreated} folders in {Math.round(summary.durationMs / 1000)}s.
+                        </p>
+                        <div className="mt-4">
+                          {isSummaryLoading ? (
+                            <div className="h-12 rounded-lg bg-white/5 animate-pulse" />
+                          ) : summaryText ? (
+                            <p className="text-[13px] text-white/70 leading-relaxed">
+                              {summaryText}
+                            </p>
+                          ) : (
+                            <p className="text-[13px] text-white/40">
+                              Summary unavailable.
+                            </p>
+                          )}
+                        </div>
+                        <div className="mt-5 flex flex-wrap gap-3 text-[11px] text-white/70">
+                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
+                            Scanned · {summary.total}
+                          </div>
+                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
+                            Folders · {summary.foldersCreated}
+                          </div>
+                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
+                            Skipped · {summary.skipped}
+                          </div>
+                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
+                            Conflicts · {summary.conflicts}
+                          </div>
+                        </div>
+                        {topCategories.length > 0 && (
+                          <div className="mt-6">
+                            <p className="text-[11px] uppercase tracking-wider text-white/40">
+                              Top Categories
+                            </p>
+                            <div className="flex flex-wrap gap-2 mt-2">
+                              {topCategories.map(([cat, count]) => (
+                                <div
+                                  key={cat}
+                                  className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] text-white/70"
+                                >
+                                  {cat} · {count}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <div className="mt-6 flex flex-col gap-2">
+                          <Button
+                            onClick={() => {
+                              setShowSummaryMain(false);
+                              if (conflicts.length > 0) {
+                                setShowConflictDialog(true);
+                              }
+                            }}
+                            className="w-full bg-white text-black hover:bg-white/90"
+                          >
+                            Review conflicts
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setShowSummaryMain(false);
+                              setSelectedCategory(categoryList[0] ?? null);
+                            }}
+                            className="w-full border-white/10 bg-transparent text-white/70 hover:bg-white/5"
+                          >
+                            Review folders
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : hasResults ? (
                   <FileList
                     files={filesInSelectedCategory}
                     folders={subfoldersInSelectedCategory}
@@ -944,15 +1267,8 @@ function App() {
                       onDeselectAll={deselectAllPreviews}
                       isReadOnly={hasScanned}
                       processedFiles={processedPreviewPaths}
-                      hideProcessed={isScanning}
+                      hideProcessed={false}
                     />
-                    {isScanInProgress && (
-                      <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px] flex items-center justify-center">
-                        <div className="text-[12px] text-white/60">
-                          Analyzing {processedFiles}/{totalFiles}
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
@@ -960,7 +1276,68 @@ function App() {
 
             {/* Right - Preview panel */}
             <AnimatePresence>
-              {selectedFile && (
+              {isScanInProgress ? (
+                <motion.aside
+                  initial={{ width: 0, opacity: 0 }}
+                  animate={{ width: 280, opacity: 1 }}
+                  exit={{ width: 0, opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="shrink-0 border-l border-white/5 overflow-hidden bg-[var(--bg-secondary)]"
+                >
+                  <div className="h-full flex flex-col">
+                    <div className="px-4 py-3 border-b border-white/5">
+                      <div className="text-[11px] uppercase tracking-wider text-white/40">
+                        Activity
+                      </div>
+                      <div className="text-[12px] text-white/70 mt-1">
+                        {processedFiles}/{totalFiles}
+                      </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto">
+                      <div className="p-3 space-y-2">
+                        {activityEvents.length === 0 ? (
+                          <div className="text-[12px] text-white/40">Waiting for results...</div>
+                        ) : (
+                          activityEvents.map((event) => (
+                            <div
+                              key={event.id}
+                              className="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/[0.02] border border-white/5"
+                            >
+                              <div
+                                className={`w-2 h-2 rounded-full ${
+                                  event.type === "proposed"
+                                    ? "bg-green-400"
+                                    : event.type === "skipped"
+                                      ? "bg-amber-400"
+                                      : event.type === "failed"
+                                        ? "bg-red-400"
+                                        : "bg-white/40"
+                                }`}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[12px] text-white/80 truncate">
+                                  {event.title}
+                                </p>
+                                {event.detail && (
+                                  <p className="text-[11px] text-white/30 truncate">
+                                    {event.detail}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-white/30">
+                                {new Date(event.time).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </motion.aside>
+              ) : selectedFile && (
                 <motion.aside
                   initial={{ width: 0, opacity: 0 }}
                   animate={{ width: 320, opacity: 1 }}

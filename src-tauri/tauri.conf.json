@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Smart Dump",
+  "productName": "SnapSort",
   "version": "0.1.0",
   "identifier": "com.pawan.smartdump",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Smart Dump",
+        "title": "SnapSort",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
