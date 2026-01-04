@@ -58,15 +58,6 @@ interface MoveRecord {
   renamed: boolean;
 }
 
-interface ScanSummary {
-  total: number;
-  processed: number;
-  skipped: number;
-  conflicts: number;
-  foldersCreated: number;
-  durationMs: number;
-}
-
 function App() {
   // Settings
   const [apiKey, setApiKey] = useState("**REMOVED**");
@@ -107,12 +98,7 @@ function App() {
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
   const [scanStartedAt, setScanStartedAt] = useState<number | null>(null);
-  const [summary, setSummary] = useState<ScanSummary | null>(null);
-  const [showSummaryMain, setShowSummaryMain] = useState(false);
   const [showHome, setShowHome] = useState(true);
-  const [summaryText, setSummaryText] = useState<string | null>(null);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [isSummaryLoading, setIsSummaryLoading] = useState(false);
 
   // Animation state for file movement
   const [exitingFileIds, setExitingFileIds] = useState<Set<string>>(new Set());
@@ -120,7 +106,7 @@ function App() {
   const [processedPreviewPaths, setProcessedPreviewPaths] = useState<Set<string>>(new Set());
 
   // Build folder tree from proposals
-  const { folderTree, categoryList, fileCounts } = useMemo(() => {
+  const { folderTree, categoryList } = useMemo(() => {
     const categories = [...new Set(proposals.map(p => p.proposed_category))];
     const counts: Record<string, { total: number; selected: number }> = {};
 
@@ -133,7 +119,7 @@ function App() {
     });
 
     const tree = buildFolderTree(categories, counts);
-    return { folderTree: tree, categoryList: categories, fileCounts: counts };
+    return { folderTree: tree, categoryList: categories };
   }, [proposals]);
 
   // Files in selected category
@@ -161,20 +147,6 @@ function App() {
   const selectedCount = proposals.filter(p => p.selected).length;
   const totalCount = proposals.length;
   const conflictIds = useMemo(() => new Set(conflicts.map(c => c.id)), [conflicts]);
-  const folderCount = useMemo(() => {
-    const top = new Set(proposals.map(p => p.proposed_category.split("/")[0]));
-    return top.size;
-  }, [proposals]);
-  const topCategories = useMemo(() => {
-    const counts: Record<string, number> = {};
-    proposals.forEach((p) => {
-      const top = p.proposed_category.split("/")[0];
-      counts[top] = (counts[top] || 0) + 1;
-    });
-    return Object.entries(counts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6);
-  }, [proposals]);
 
   // Event listeners
   useEffect(() => {
@@ -244,43 +216,6 @@ function App() {
     };
   }, []);
 
-  const fetchSummary = useCallback(async () => {
-    if (!summary || !apiKey) return;
-    setIsSummaryLoading(true);
-    setSummaryError(null);
-    try {
-        const text = await invoke<string>("get_scan_summary", {
-          request: {
-            total: summary.total,
-            processed: summary.processed,
-            skipped: summary.skipped,
-            conflicts: summary.conflicts,
-            folders: summary.foldersCreated,
-            duration_seconds: Math.round(summary.durationMs / 1000),
-            top_categories: topCategories.map(([name, count]) => [name, count]),
-          },
-          apiKey,
-        });
-      const cleaned = (text ?? "").trim();
-      if (cleaned.length > 0) {
-        setSummaryText(cleaned);
-      } else {
-        setSummaryText(null);
-        setSummaryError("Summary unavailable.");
-      }
-    } catch (e) {
-      setSummaryText(null);
-      setSummaryError("Summary unavailable. Check your API key and try again.");
-    } finally {
-      setIsSummaryLoading(false);
-    }
-  }, [summary, apiKey, topCategories]);
-
-  useEffect(() => {
-    if (!summary || !showSummaryMain || isSummaryLoading || summaryText || summaryError || !apiKey)
-      return;
-    fetchSummary();
-  }, [summary, showSummaryMain, isSummaryLoading, summaryText, summaryError, apiKey, fetchSummary]);
 
   useEffect(() => {
     if (!isResizingSidebar) return;
@@ -410,10 +345,10 @@ function App() {
 
   // Auto-select first category
   useEffect(() => {
-    if (categoryList.length > 0 && !selectedCategory && !showSummaryMain) {
+    if (categoryList.length > 0 && !selectedCategory) {
       setSelectedCategory(categoryList[0]);
     }
-  }, [categoryList, selectedCategory, showSummaryMain]);
+  }, [categoryList, selectedCategory]);
 
   async function startScan(options?: { path?: string; selectedPaths?: string[] }) {
     if (isScanning) {
@@ -442,12 +377,7 @@ function App() {
         setOverwriteIds(new Set());
         setProcessedPreviewPaths(new Set());
         setActivityEvents([]);
-        setSummary(null);
-        setShowSummaryMain(false);
         setShowHome(false);
-        setSummaryText(null);
-        setSummaryError(null);
-        setIsSummaryLoading(false);
         setHasScanned(true);
         setHasOptimized(false); // Reset optimization flag
         if (options?.path && options.path !== path) {
@@ -483,13 +413,8 @@ function App() {
     setOverwriteIds(new Set());
     setProcessedPreviewPaths(new Set());
     setActivityEvents([]);
-    setSummary(null);
-    setShowSummaryMain(false);
     setScanStartedAt(null);
     setShowHome(true);
-    setSummaryText(null);
-    setSummaryError(null);
-    setIsSummaryLoading(false);
     loadPreviewFiles();
   }
 
@@ -546,22 +471,15 @@ function App() {
       setIsScanning(false);
     }
 
-    if (scanStartedAt && !summary) {
-      const elapsed = Date.now() - scanStartedAt;
-      const total = totalFiles;
-      const skipped = skippedFiles.length;
-      const uniqueFolders = new Set(proposals.map(p => p.proposed_category.split("/")[0]));
-      const conflictsCount = conflicts.length;
-      setSummary({
-        total,
-        processed: processedFiles,
-        skipped,
-        conflicts: conflictsCount,
-        foldersCreated: uniqueFolders.size,
-        durationMs: elapsed,
+    if (scanStartedAt && proposals.length > 0) {
+      const counts = new Map<string, number>();
+      proposals.forEach((p) => {
+        counts.set(p.proposed_category, (counts.get(p.proposed_category) ?? 0) + 1);
       });
-      setShowSummaryMain(true);
-      setSelectedCategory(null);
+      const mostUsedCategory = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (mostUsedCategory) {
+        setSelectedCategory(mostUsedCategory);
+      }
     }
 
     // Don't run optimization if already done
@@ -1157,7 +1075,7 @@ function App() {
 
             {/* Middle - File list */}
             <main className="flex-1 flex flex-col overflow-hidden bg-[var(--bg-primary)]">
-              {selectedCategory && !showSummaryMain && (
+              {selectedCategory && (
                 <div className="shrink-0 px-5 py-3 border-b border-white/5 bg-[var(--bg-tertiary)]">
                   <div className="flex items-center gap-2">
                     {selectedCategory.split('/').map((part, index, arr) => (
@@ -1191,117 +1109,6 @@ function App() {
                     hideProcessed
                     showProcessedBadge={false}
                   />
-                ) : showSummaryMain && summary ? (
-                  <div className="h-full flex flex-col">
-                    <div className="flex-1 overflow-y-auto p-8">
-                      <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-white/10 via-white/[0.04] to-transparent p-6">
-                        <p className="text-[11px] uppercase tracking-wider text-white/40">
-                          AI Summary
-                        </p>
-                        <h2 className="text-[22px] text-white font-semibold mt-2">
-                          Your screenshots are organized.
-                        </h2>
-                        <p className="text-[13px] text-white/60 mt-1">
-                          {summary.processed} files sorted into {summary.foldersCreated} folders in {Math.round(summary.durationMs / 1000)}s.
-                        </p>
-                        <div className="mt-4">
-                          {!apiKey ? (
-                            <div className="space-y-3">
-                              <div className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-[11px] text-amber-200/80">
-                                <AlertTriangle className="h-3 w-3" />
-                                Add your Anthropic API key in Settings to generate the summary.
-                              </div>
-                              <Button
-                                onClick={() => setShowSettings(true)}
-                                variant="outline"
-                                className="border-white/10 bg-transparent text-white/70 hover:bg-white/5"
-                              >
-                                Open Settings
-                              </Button>
-                            </div>
-                          ) : isSummaryLoading ? (
-                            <div className="space-y-2">
-                              <div className="h-12 rounded-lg bg-white/5 animate-pulse" />
-                              <p className="text-[12px] text-white/35">Generating summary…</p>
-                            </div>
-                          ) : summaryText ? (
-                            <p className="text-[13px] text-white/70 leading-relaxed">
-                              {summaryText}
-                            </p>
-                          ) : (
-                            <p className="text-[13px] text-white/40">
-                              {summaryError ?? "Summary unavailable."}
-                            </p>
-                          )}
-                          {summaryError && apiKey && !isSummaryLoading && (
-                            <div className="mt-3">
-                              <Button
-                                onClick={() => fetchSummary()}
-                                variant="outline"
-                                className="border-white/10 bg-transparent text-white/70 hover:bg-white/5"
-                              >
-                                Retry summary
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-                        <div className="mt-5 flex flex-wrap gap-3 text-[11px] text-white/70">
-                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
-                            Scanned · {summary.total}
-                          </div>
-                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
-                            Folders · {summary.foldersCreated}
-                          </div>
-                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
-                            Skipped · {summary.skipped}
-                          </div>
-                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10">
-                            Conflicts · {summary.conflicts}
-                          </div>
-                        </div>
-                        {topCategories.length > 0 && (
-                          <div className="mt-6">
-                            <p className="text-[11px] uppercase tracking-wider text-white/40">
-                              Top Categories
-                            </p>
-                            <div className="flex flex-wrap gap-2 mt-2">
-                              {topCategories.map(([cat, count]) => (
-                                <div
-                                  key={cat}
-                                  className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[11px] text-white/70"
-                                >
-                                  {cat} · {count}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <div className="mt-6 flex flex-col gap-2">
-                          <Button
-                            onClick={() => {
-                              setShowSummaryMain(false);
-                              if (conflicts.length > 0) {
-                                setShowConflictDialog(true);
-                              }
-                            }}
-                            className="w-full bg-white text-black hover:bg-white/90"
-                          >
-                            Review conflicts
-                          </Button>
-                          <Button
-                            variant="outline"
-                            onClick={() => {
-                              setShowSummaryMain(false);
-                              setSelectedCategory(categoryList[0] ?? null);
-                            }}
-                            className="w-full border-white/10 bg-transparent text-white/70 hover:bg-white/5"
-                          >
-                            Review folders
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
                 ) : hasResults ? (
                   <FileList
                     files={filesInSelectedCategory}
