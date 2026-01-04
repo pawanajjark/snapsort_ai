@@ -893,6 +893,9 @@ function App() {
                         Drop a folder, review the preview, and accept a tidy structure you can search
                         later. No surprises, just confident moves.
                       </p>
+                      <p className="text-[12px] text-white/45 mt-3 leading-relaxed max-w-xl">
+                        Built after my desktop drowned in screenshots—SnapSort keeps it clean in minutes.
+                      </p>
                       <div className="mt-7 flex items-center gap-3">
                         <Button
                           onClick={() => setShowFolderPicker(true)}

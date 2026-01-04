@@ -1,7 +1,7 @@
-# Tauri + React + Typescript
+# SnapSort
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+SnapSort is a desktop app that turns messy screenshot folders into clean, searchable libraries in minutes. Drop a folder, review the preview, and accept a tidy structure you can trust.
 
-## Recommended IDE Setup
+## Story
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+My Mac desktop was drowning in screenshots, so I built SnapSort to organize them in minutes—clean names, smart categories, and full control before any files move.
