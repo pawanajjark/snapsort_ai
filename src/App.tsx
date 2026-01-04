@@ -61,7 +61,7 @@ interface MoveRecord {
 function App() {
   // Settings
   const [apiKey, setApiKey] = useState("");
-  const [path, setPath] = useState("/Users/pawan/Desktop/Select");
+  const [path, setPath] = useState("/Users/pawan/Desktop");
   const [showSettings, setShowSettings] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
 
