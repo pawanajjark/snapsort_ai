@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useState } from "react";
-import { Loader2, AlertTriangle, Image, Check, Circle } from "lucide-react";
+import { Loader2, AlertTriangle, Image, Check } from "lucide-react";
 
 interface FileInfo {
   path: string;
@@ -229,11 +229,4 @@ function PreviewThumbnail({
       </motion.div>
     </motion.div>
   );
-}
-
-// Helper to format file size
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

@@ -80,10 +80,9 @@ interface FolderItemProps {
   depth: number;
   selectedPath: string | null;
   onSelect: (path: string) => void;
-  isLast: boolean;
 }
 
-function FolderItem({ node, depth, selectedPath, onSelect, isLast }: FolderItemProps) {
+function FolderItem({ node, depth, selectedPath, onSelect }: FolderItemProps) {
   const [isExpanded, setIsExpanded] = useState(true);
   const hasChildren = node.children.length > 0;
   const isSelected = selectedPath === node.path;
@@ -162,14 +161,13 @@ function FolderItem({ node, depth, selectedPath, onSelect, isLast }: FolderItemP
             transition={{ duration: 0.2, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            {node.children.map((child, index) => (
+            {node.children.map((child) => (
               <FolderItem
                 key={child.path}
                 node={child}
                 depth={depth + 1}
                 selectedPath={selectedPath}
                 onSelect={onSelect}
-                isLast={index === node.children.length - 1}
               />
             ))}
           </motion.div>
@@ -193,14 +191,13 @@ export function FolderTree({ folders, selectedPath, onSelectFolder }: FolderTree
   return (
     <ScrollArea className="h-full" data-folder-tree>
       <div className="p-2">
-        {folders.map((folder, index) => (
+        {folders.map((folder) => (
           <FolderItem
             key={folder.path}
             node={folder}
             depth={0}
             selectedPath={selectedPath}
             onSelect={onSelectFolder}
-            isLast={index === folders.length - 1}
           />
         ))}
       </div>

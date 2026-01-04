@@ -1,11 +1,11 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import { Settings, Loader2, Check, Layers, FolderOpen, AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { FolderTree, buildFolderTree, type FolderNode } from "@/components/FolderTree";
+import { FolderTree, buildFolderTree } from "@/components/FolderTree";
 import { FileList } from "@/components/FileCard";
 import { PreviewPanel } from "@/components/PreviewPanel";
 import { SettingsSheet } from "@/components/SettingsSheet";
@@ -245,15 +245,13 @@ function App() {
       console.log("File processing failed:", e.payload);
       setProcessedFiles(prev => prev + 1);
       setActivityEvents(prev => {
-        const next = [
-          {
-            id: `failed-${Date.now()}`,
-            type: "failed",
-            title: String(e.payload),
-            time: Date.now(),
-          },
-          ...prev,
-        ];
+        const failedEvent: ActivityEvent = {
+          id: `failed-${Date.now()}`,
+          type: "failed",
+          title: String(e.payload),
+          time: Date.now(),
+        };
+        const next = [failedEvent, ...prev];
         return next.slice(0, 120);
       });
     });
@@ -763,7 +761,7 @@ function App() {
           </motion.button>
 
           <Button
-            onClick={startScan}
+            onClick={() => startScan()}
             disabled={!apiKey || (!hasScanned && selectedPreviews.size === 0)}
             variant={isScanning ? "destructive" : "default"}
             className={
