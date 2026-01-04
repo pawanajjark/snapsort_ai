@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FolderOpen, Key, Save } from "lucide-react";
+import { Key, Save } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 
 interface SettingsSheetProps {
   open: boolean;
@@ -57,29 +56,6 @@ export function SettingsSheet({
         </SheetHeader>
 
         <div className="px-6 py-6 space-y-6">
-          {/* Watch Folder */}
-          <div className="space-y-2">
-            <label className="text-[11px] font-medium text-white/50 uppercase tracking-wider flex items-center gap-2">
-              <FolderOpen className="w-3.5 h-3.5" />
-              Watch Folder
-            </label>
-            <Input
-              value={tempPath}
-              onChange={(e) => setTempPath(e.target.value)}
-              placeholder="/Users/you/Desktop/Select"
-              className="
-                bg-white/5 border-white/10 text-white text-[13px] font-mono
-                placeholder:text-white/20
-                focus:border-white/20 focus:ring-1 focus:ring-white/10
-              "
-            />
-            <p className="text-[11px] text-white/30">
-              The folder where your screenshots are saved
-            </p>
-          </div>
-
-          <Separator className="bg-white/5" />
-
           {/* API Key */}
           <div className="space-y-2">
             <label className="text-[11px] font-medium text-white/50 uppercase tracking-wider flex items-center gap-2">

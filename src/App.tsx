@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
@@ -111,6 +111,7 @@ function App() {
   const [showSummaryMain, setShowSummaryMain] = useState(false);
   const [showHome, setShowHome] = useState(true);
   const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
 
   // Animation state for file movement
@@ -243,12 +244,11 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!summary || !showSummaryMain || isSummaryLoading || summaryText || !apiKey) return;
-
-    const fetchSummary = async () => {
-      setIsSummaryLoading(true);
-      try {
+  const fetchSummary = useCallback(async () => {
+    if (!summary || !apiKey) return;
+    setIsSummaryLoading(true);
+    setSummaryError(null);
+    try {
         const text = await invoke<string>("get_scan_summary", {
           request: {
             total: summary.total,
@@ -256,21 +256,31 @@ function App() {
             skipped: summary.skipped,
             conflicts: summary.conflicts,
             folders: summary.foldersCreated,
-            durationSeconds: Math.round(summary.durationMs / 1000),
-                            topCategories: topCategories.map(([name, count]) => [name, count]),
+            duration_seconds: Math.round(summary.durationMs / 1000),
+            top_categories: topCategories.map(([name, count]) => [name, count]),
           },
           apiKey,
         });
-        setSummaryText(text);
-      } catch (e) {
+      const cleaned = (text ?? "").trim();
+      if (cleaned.length > 0) {
+        setSummaryText(cleaned);
+      } else {
         setSummaryText(null);
-      } finally {
-        setIsSummaryLoading(false);
+        setSummaryError("Summary unavailable.");
       }
-    };
+    } catch (e) {
+      setSummaryText(null);
+      setSummaryError("Summary unavailable. Check your API key and try again.");
+    } finally {
+      setIsSummaryLoading(false);
+    }
+  }, [summary, apiKey, topCategories]);
 
+  useEffect(() => {
+    if (!summary || !showSummaryMain || isSummaryLoading || summaryText || summaryError || !apiKey)
+      return;
     fetchSummary();
-  }, [summary, showSummaryMain, isSummaryLoading, summaryText, apiKey, topCategories]);
+  }, [summary, showSummaryMain, isSummaryLoading, summaryText, summaryError, apiKey, fetchSummary]);
 
   useEffect(() => {
     if (!isResizingSidebar) return;
@@ -400,10 +410,10 @@ function App() {
 
   // Auto-select first category
   useEffect(() => {
-    if (categoryList.length > 0 && !selectedCategory) {
+    if (categoryList.length > 0 && !selectedCategory && !showSummaryMain) {
       setSelectedCategory(categoryList[0]);
     }
-  }, [categoryList, selectedCategory]);
+  }, [categoryList, selectedCategory, showSummaryMain]);
 
   async function startScan(options?: { path?: string; selectedPaths?: string[] }) {
     if (isScanning) {
@@ -436,6 +446,7 @@ function App() {
         setShowSummaryMain(false);
         setShowHome(false);
         setSummaryText(null);
+        setSummaryError(null);
         setIsSummaryLoading(false);
         setHasScanned(true);
         setHasOptimized(false); // Reset optimization flag
@@ -477,6 +488,7 @@ function App() {
     setScanStartedAt(null);
     setShowHome(true);
     setSummaryText(null);
+    setSummaryError(null);
     setIsSummaryLoading(false);
     loadPreviewFiles();
   }
@@ -549,6 +561,7 @@ function App() {
         durationMs: elapsed,
       });
       setShowSummaryMain(true);
+      setSelectedCategory(null);
     }
 
     // Don't run optimization if already done
@@ -977,6 +990,12 @@ function App() {
                           Preview screenshots
                         </Button>
                       </div>
+                      {!apiKey && (
+                        <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-[11px] text-amber-200/80">
+                          <AlertTriangle className="h-3 w-3" />
+                          Add your Anthropic API key in Settings to enable smart sorting.
+                        </div>
+                      )}
                       <div className="mt-6 flex items-center gap-6 text-[11px] text-white/40">
                         <span className="flex items-center gap-2">
                           <span className="inline-block h-1.5 w-1.5 rounded-full bg-white/30" />
@@ -995,34 +1014,47 @@ function App() {
 
                     <div className="rounded-2xl border border-white/10 bg-[var(--bg-secondary)]/70 p-5">
                       <div className="flex items-center justify-between text-[11px] text-white/40">
-                        <span>Preview</span>
-                        <span className="font-mono">0 selected</span>
+                        <span>Before → After</span>
+                        <span className="font-mono">preview</span>
                       </div>
-                      <div className="mt-4 space-y-3">
+                      <div className="mt-4 grid grid-cols-1 gap-3">
                         <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
-                          <div className="flex items-center justify-between">
-                            <div className="h-2 w-28 rounded-full bg-white/10" />
-                            <div className="h-2 w-10 rounded-full bg-white/5" />
+                          <p className="text-[10px] text-white/40 uppercase tracking-wider">Before</p>
+                          <div className="mt-3 space-y-2 text-[12px] text-white/55 font-mono">
+                            <div className="flex items-center justify-between">
+                              <span>Screenshot 2026-01-04 at 6.36.50 PM.png</span>
+                              <span className="text-white/25">4.2 MB</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span>Screen Shot 2026-01-03 at 9.12.10 PM.png</span>
+                              <span className="text-white/25">3.8 MB</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span>IMG_0041.png</span>
+                              <span className="text-white/25">2.1 MB</span>
+                            </div>
                           </div>
-                          <div className="mt-3 h-16 rounded-lg bg-gradient-to-br from-white/10 to-transparent border border-white/5" />
                         </div>
                         <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
-                          <div className="flex items-center justify-between">
-                            <div className="h-2 w-24 rounded-full bg-white/10" />
-                            <div className="h-2 w-12 rounded-full bg-white/5" />
+                          <p className="text-[10px] text-white/40 uppercase tracking-wider">After</p>
+                          <div className="mt-3 space-y-2 text-[12px] text-white/60">
+                            <div className="flex items-center justify-between">
+                              <span>Receipts / Stripe · 12 files</span>
+                              <span className="text-white/25">→</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span>Code / Errors · 9 files</span>
+                              <span className="text-white/25">→</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span>Chat / Support · 6 files</span>
+                              <span className="text-white/25">→</span>
+                            </div>
                           </div>
-                          <div className="mt-3 h-16 rounded-lg bg-gradient-to-br from-white/10 to-transparent border border-white/5" />
-                        </div>
-                        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
-                          <div className="flex items-center justify-between">
-                            <div className="h-2 w-32 rounded-full bg-white/10" />
-                            <div className="h-2 w-8 rounded-full bg-white/5" />
-                          </div>
-                          <div className="mt-3 h-16 rounded-lg bg-gradient-to-br from-white/10 to-transparent border border-white/5" />
                         </div>
                       </div>
                       <div className="mt-4 text-[11px] text-white/35">
-                        Review before moving. One click to accept the new structure.
+                        Messy names become clean, searchable folders.
                       </div>
                     </div>
                   </div>
@@ -1125,7 +1157,7 @@ function App() {
 
             {/* Middle - File list */}
             <main className="flex-1 flex flex-col overflow-hidden bg-[var(--bg-primary)]">
-              {selectedCategory && (
+              {selectedCategory && !showSummaryMain && (
                 <div className="shrink-0 px-5 py-3 border-b border-white/5 bg-[var(--bg-tertiary)]">
                   <div className="flex items-center gap-2">
                     {selectedCategory.split('/').map((part, index, arr) => (
@@ -1173,16 +1205,44 @@ function App() {
                           {summary.processed} files sorted into {summary.foldersCreated} folders in {Math.round(summary.durationMs / 1000)}s.
                         </p>
                         <div className="mt-4">
-                          {isSummaryLoading ? (
-                            <div className="h-12 rounded-lg bg-white/5 animate-pulse" />
+                          {!apiKey ? (
+                            <div className="space-y-3">
+                              <div className="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-[11px] text-amber-200/80">
+                                <AlertTriangle className="h-3 w-3" />
+                                Add your Anthropic API key in Settings to generate the summary.
+                              </div>
+                              <Button
+                                onClick={() => setShowSettings(true)}
+                                variant="outline"
+                                className="border-white/10 bg-transparent text-white/70 hover:bg-white/5"
+                              >
+                                Open Settings
+                              </Button>
+                            </div>
+                          ) : isSummaryLoading ? (
+                            <div className="space-y-2">
+                              <div className="h-12 rounded-lg bg-white/5 animate-pulse" />
+                              <p className="text-[12px] text-white/35">Generating summary…</p>
+                            </div>
                           ) : summaryText ? (
                             <p className="text-[13px] text-white/70 leading-relaxed">
                               {summaryText}
                             </p>
                           ) : (
                             <p className="text-[13px] text-white/40">
-                              Summary unavailable.
+                              {summaryError ?? "Summary unavailable."}
                             </p>
+                          )}
+                          {summaryError && apiKey && !isSummaryLoading && (
+                            <div className="mt-3">
+                              <Button
+                                onClick={() => fetchSummary()}
+                                variant="outline"
+                                className="border-white/10 bg-transparent text-white/70 hover:bg-white/5"
+                              >
+                                Retry summary
+                              </Button>
+                            </div>
                           )}
                         </div>
                         <div className="mt-5 flex flex-wrap gap-3 text-[11px] text-white/70">
