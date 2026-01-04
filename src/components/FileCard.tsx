@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Check, Circle, Pencil, ArrowRight, Loader2 } from "lucide-react";
+import { Check, Circle, Pencil, ArrowRight, Loader2, AlertTriangle, FolderOpen } from "lucide-react";
 import { useState } from "react";
 
 interface FileProposal {
@@ -21,6 +21,8 @@ interface FileCardProps {
   onToggleSelection: () => void;
   onEdit: () => void;
   isExiting?: boolean;
+  moveError?: string;
+  hasConflict?: boolean;
 }
 
 export function FileCard({
@@ -31,6 +33,8 @@ export function FileCard({
   onToggleSelection,
   onEdit,
   isExiting = false,
+  moveError,
+  hasConflict = false,
 }: FileCardProps) {
   const [imageLoaded, setImageLoaded] = useState(false);
   const [imageError, setImageError] = useState(false);
@@ -52,6 +56,7 @@ export function FileCard({
         ease: "easeOut"
       }}
       onClick={onSelect}
+      data-file-key={encodeURIComponent(file.id)}
       className={`
         group relative flex items-start gap-4 p-4 rounded-xl cursor-pointer
         border transition-colors duration-100
@@ -126,6 +131,23 @@ export function FileCard({
         <p className="text-[11px] text-white/30 mt-2 line-clamp-1 italic">
           {file.reasoning}
         </p>
+
+        {moveError && (
+          <div
+            className="flex items-center gap-1 text-[10px] text-amber-400 mt-1"
+            title={moveError}
+          >
+            <AlertTriangle className="w-3 h-3" />
+            <span className="truncate">Move failed</span>
+          </div>
+        )}
+
+        {hasConflict && !moveError && (
+          <div className="flex items-center gap-1 text-[10px] text-amber-300 mt-1">
+            <AlertTriangle className="w-3 h-3" />
+            <span className="truncate">Conflict</span>
+          </div>
+        )}
       </div>
 
       {/* Edit Button */}
@@ -164,36 +186,73 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface FileListProps {
   files: FileProposal[];
+  folders: string[];
+  selectedPath: string | null;
   selectedFileId: string | null;
   exitingFileIds: Set<string>;
+  moveErrors: Record<string, string>;
+  conflictIds: Set<string>;
   onSelectFile: (file: FileProposal) => void;
   onToggleSelection: (id: string) => void;
   onEditFile: (file: FileProposal) => void;
+  onSelectFolder: (path: string) => void;
 }
 
 export function FileList({
   files,
+  folders,
+  selectedPath,
   selectedFileId,
   exitingFileIds,
+  moveErrors,
+  conflictIds,
   onSelectFile,
   onToggleSelection,
   onEditFile,
+  onSelectFolder,
 }: FileListProps) {
-  if (files.length === 0) {
+  if (files.length === 0 && folders.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center p-6">
         <div className="w-12 h-12 rounded-xl bg-white/5 flex items-center justify-center mb-3">
           <ArrowRight className="w-5 h-5 text-white/20" />
         </div>
-        <p className="text-[13px] text-white/40">Select a folder</p>
-        <p className="text-[11px] text-white/25 mt-1">to view its files</p>
+        <p className="text-[13px] text-white/40">No items here</p>
+        <p className="text-[11px] text-white/25 mt-1">Try a different folder</p>
       </div>
     );
   }
 
   return (
     <ScrollArea className="h-full">
-      <div className="p-3 space-y-1">
+      <div className="p-3 space-y-1" data-file-list>
+        {selectedPath && selectedPath.includes("/") && (
+          <button
+            onClick={() => onSelectFolder(selectedPath.split("/").slice(0, -1).join("/"))}
+            className="w-full flex items-center gap-3 p-3 rounded-xl border border-white/5 bg-white/[0.02] text-left text-[13px] text-white/70 hover:bg-white/5 transition-colors"
+          >
+            <ArrowRight className="w-4 h-4 text-white/30 rotate-180" />
+            <span className="flex-1 truncate">Back</span>
+          </button>
+        )}
+        {folders.map((folder) => (
+          <button
+            key={folder}
+            onClick={() => onSelectFolder(folder)}
+            className="group w-full flex items-center gap-4 p-4 rounded-xl border border-white/5 bg-white/[0.02] text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="w-10 h-8 rounded-lg bg-white/5 flex items-center justify-center border border-white/10">
+              <FolderOpen className="w-4 h-4 text-white/50" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[13px] text-white/80 font-medium truncate">
+                {folder.split("/").slice(-1)[0]}
+              </p>
+              <p className="text-[11px] text-white/30 mt-1">Folder</p>
+            </div>
+            <ArrowRight className="w-4 h-4 text-white/30 group-hover:text-white/60 transition-colors" />
+          </button>
+        ))}
         <AnimatePresence mode="popLayout">
           {files.map((file, index) => (
             <FileCard
@@ -202,6 +261,8 @@ export function FileList({
               index={index}
               isPreviewActive={selectedFileId === file.id}
               isExiting={exitingFileIds.has(file.id)}
+              moveError={moveErrors[file.id]}
+              hasConflict={conflictIds.has(file.id)}
               onSelect={() => onSelectFile(file)}
               onToggleSelection={() => onToggleSelection(file.id)}
               onEdit={() => onEditFile(file)}
@@ -212,4 +273,3 @@ export function FileList({
     </ScrollArea>
   );
 }
-

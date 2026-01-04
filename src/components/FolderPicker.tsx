@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { FolderOpen, Search, AlertTriangle, Image, Loader2 } from "lucide-react";
+import { FolderOpen, ChevronLeft, AlertTriangle, Image, Loader2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +11,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 
 interface FileInfo {
   path: string;
@@ -20,12 +19,17 @@ interface FileInfo {
   is_valid: boolean;
 }
 
+interface FolderInfo {
+  path: string;
+  name: string;
+}
+
 interface FolderPickerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   currentPath: string;
   onSelectFolder: (path: string) => void;
-  onStartScan: () => void;
+  onStartScan: (path: string, selectedPaths: string[]) => void;
 }
 
 export function FolderPicker({
@@ -38,6 +42,7 @@ export function FolderPicker({
   const [folderPath, setFolderPath] = useState(currentPath);
   const [isLoading, setIsLoading] = useState(false);
   const [files, setFiles] = useState<FileInfo[]>([]);
+  const [folders, setFolders] = useState<FolderInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // Load files when folder changes
@@ -51,12 +56,15 @@ export function FolderPicker({
     setIsLoading(true);
     setError(null);
     setFiles([]);
+    setFolders([]);
 
     try {
-      const result = await invoke<FileInfo[]>("list_folder_screenshots", {
-        path: folderPath,
-      });
-      setFiles(result);
+      const [folderResults, fileResults] = await Promise.all([
+        invoke<FolderInfo[]>("list_subfolders", { path: folderPath }),
+        invoke<FileInfo[]>("list_folder_screenshots", { path: folderPath }),
+      ]);
+      setFolders(folderResults);
+      setFiles(fileResults);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -75,9 +83,24 @@ export function FolderPicker({
   }
 
   function handleScan() {
+    const selectedPaths = validFiles.map((file) => file.path);
     onSelectFolder(folderPath);
     onOpenChange(false);
-    onStartScan();
+    onStartScan(folderPath, selectedPaths);
+  }
+
+  function getParentPath(path: string) {
+    if (path === "/" || path.trim() === "") return path;
+    const lastSlash = path.lastIndexOf("/");
+    if (lastSlash <= 0) return "/";
+    return path.slice(0, lastSlash);
+  }
+
+  function handleUp() {
+    const parent = getParentPath(folderPath);
+    if (parent !== folderPath) {
+      setFolderPath(parent);
+    }
   }
 
   return (
@@ -93,30 +116,84 @@ export function FolderPicker({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="px-6 py-4 border-b border-white/5">
-          <div className="flex gap-3">
-            <Input
-              value={folderPath}
-              onChange={(e) => setFolderPath(e.target.value)}
-              placeholder="/Users/you/Desktop"
-              className="
-                flex-1 bg-white/5 border-white/10 text-white text-[13px] font-mono
-                placeholder:text-white/20
-                focus:border-white/20 focus:ring-1 focus:ring-white/10
-              "
-            />
+        <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
+          <div className="flex items-center gap-3">
             <Button
-              onClick={loadFolderContents}
+              onClick={handleUp}
               variant="outline"
               className="border-white/10 bg-white/5 text-white hover:bg-white/10"
             >
-              <Search className="w-4 h-4" />
+              <ChevronLeft className="w-4 h-4 mr-1" />
+              Up
             </Button>
+            <div className="text-[12px] text-white/60 font-mono">
+              {folderPath}
+            </div>
           </div>
+          <Button
+            onClick={loadFolderContents}
+            variant="outline"
+            className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+          >
+            Refresh
+          </Button>
         </div>
 
         {/* File preview area */}
-        <div className="h-[400px] overflow-y-auto p-6">
+        <div className="h-[420px] overflow-hidden flex">
+          <div className="w-64 border-r border-white/5 overflow-y-auto">
+            <div className="px-4 py-3 text-[11px] uppercase tracking-wider text-white/40">
+              Folders
+            </div>
+            <AnimatePresence mode="wait">
+              {isLoading ? (
+                <motion.div
+                  key="folders-loading"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex items-center gap-2 px-4 py-3 text-[12px] text-white/40"
+                >
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Loading folders...
+                </motion.div>
+              ) : folders.length === 0 ? (
+                <motion.div
+                  key="folders-empty"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="px-4 py-3 text-[12px] text-white/30"
+                >
+                  No subfolders
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="folders"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="space-y-1 px-2 pb-3"
+                >
+                  {folders.map((folder) => (
+                    <button
+                      key={folder.path}
+                      onClick={() => setFolderPath(folder.path)}
+                      className={`
+                        w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left
+                        text-[12px] text-white/70 hover:bg-white/5
+                      `}
+                    >
+                      <FolderOpen className="w-3.5 h-3.5 text-white/40" />
+                      <span className="truncate">{folder.name}</span>
+                    </button>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-6">
           <AnimatePresence mode="wait">
             {isLoading ? (
               <motion.div
@@ -157,7 +234,7 @@ export function FolderPicker({
                   No screenshots found
                 </p>
                 <p className="text-[11px] text-white/25 mt-1">
-                  Looking for PNG files with "Screenshot" in the name
+                  Looking for PNG files with "screenshot" in the name
                 </p>
               </motion.div>
             ) : (
@@ -228,6 +305,7 @@ export function FolderPicker({
             )}
           </AnimatePresence>
         </div>
+        </div>
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-white/5 flex items-center justify-between">
@@ -243,7 +321,7 @@ export function FolderPicker({
             disabled={validFiles.length === 0}
             className="bg-white text-black hover:bg-white/90 font-medium disabled:opacity-50"
           >
-            <Search className="w-4 h-4 mr-2" />
+            <FolderOpen className="w-4 h-4 mr-2" />
             Scan {validFiles.length} Files
           </Button>
         </div>
@@ -251,4 +329,3 @@ export function FolderPicker({
     </Dialog>
   );
 }
-

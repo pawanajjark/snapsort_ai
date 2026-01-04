@@ -24,8 +24,9 @@ function buildFolderTree(categories: string[], fileCounts: Record<string, { tota
   categories.forEach(category => {
     const parts = category.split('/');
     let currentPath = '';
+    const counts = fileCounts[category];
 
-    parts.forEach((part, index) => {
+    parts.forEach((part) => {
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       
       if (!nodeMap.has(currentPath)) {
@@ -38,11 +39,10 @@ function buildFolderTree(categories: string[], fileCounts: Record<string, { tota
         });
       }
 
-      // Set counts for leaf nodes (full category paths)
-      if (index === parts.length - 1 && fileCounts[category]) {
+      if (counts) {
         const node = nodeMap.get(currentPath)!;
-        node.fileCount = fileCounts[category].total;
-        node.selectedCount = fileCounts[category].selected;
+        node.fileCount += counts.total;
+        node.selectedCount += counts.selected;
       }
     });
   });
@@ -88,6 +88,7 @@ function FolderItem({ node, depth, selectedPath, onSelect, isLast }: FolderItemP
   const hasChildren = node.children.length > 0;
   const isSelected = selectedPath === node.path;
   const isInSelectedPath = selectedPath?.startsWith(node.path + '/') || false;
+  const folderKey = encodeURIComponent(node.path);
 
   return (
     <div>
@@ -98,6 +99,7 @@ function FolderItem({ node, depth, selectedPath, onSelect, isLast }: FolderItemP
           }
           onSelect(node.path);
         }}
+        data-folder-key={folderKey}
         className={`
           w-full flex items-center gap-2 px-3 py-2 text-left rounded-lg
           transition-colors duration-100
@@ -189,7 +191,7 @@ export function FolderTree({ folders, selectedPath, onSelectFolder }: FolderTree
   }
 
   return (
-    <ScrollArea className="h-full">
+    <ScrollArea className="h-full" data-folder-tree>
       <div className="p-2">
         {folders.map((folder, index) => (
           <FolderItem
@@ -208,4 +210,3 @@ export function FolderTree({ folders, selectedPath, onSelectFolder }: FolderTree
 
 export { buildFolderTree };
 export type { FolderNode };
-

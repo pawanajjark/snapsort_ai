@@ -66,7 +66,7 @@ export function SettingsSheet({
             <Input
               value={tempPath}
               onChange={(e) => setTempPath(e.target.value)}
-              placeholder="/Users/you/Desktop"
+              placeholder="/Users/you/Desktop/Select"
               className="
                 bg-white/5 border-white/10 text-white text-[13px] font-mono
                 placeholder:text-white/20
@@ -116,4 +116,3 @@ export function SettingsSheet({
     </Sheet>
   );
 }
-

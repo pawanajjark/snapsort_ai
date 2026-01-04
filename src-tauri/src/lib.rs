@@ -1,7 +1,8 @@
 use base64::Engine;
 use notify::RecommendedWatcher;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
@@ -62,24 +63,87 @@ struct FileInfo {
     is_valid: bool, // Under 5MB
 }
 
+#[derive(Serialize, Clone)]
+struct FolderInfo {
+    path: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct MoveResult {
+    original_path: String,
+    final_path: String,
+    renamed: bool,
+}
+
 // 5MB limit
 const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
 
+fn is_screenshot_png(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    let is_png = lower.ends_with(".png");
+    let has_screenshot = lower.contains("screenshot") || lower.contains("screen shot");
+    is_png && has_screenshot
+}
+
+fn contains_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
 #[tauri::command]
-fn execute_action(original_path: String, new_path: String) -> Result<String, String> {
+fn execute_action(
+    original_path: String,
+    new_path: String,
+    root_path: Option<String>,
+    overwrite: Option<bool>,
+) -> Result<MoveResult, String> {
     let src = Path::new(&original_path);
     let dst = Path::new(&new_path);
+    let allow_overwrite = overwrite.unwrap_or(false);
 
     if !src.exists() {
         return Err("Source file no longer exists".to_string());
+    }
+
+    if contains_parent_dir(dst) {
+        return Err("Destination contains invalid path segments".to_string());
+    }
+
+    if let Some(root) = root_path.as_deref().map(Path::new) {
+        if !src.starts_with(root) || !dst.starts_with(root) {
+            return Err("Destination must stay within the scan folder".to_string());
+        }
+    } else if let Some(parent) = src.parent() {
+        if !dst.starts_with(parent) {
+            return Err("Destination must stay within the source folder".to_string());
+        }
+    } else {
+        return Err("Source path has no parent folder".to_string());
     }
 
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
+    if dst.exists() {
+        if allow_overwrite {
+            if dst.is_file() {
+                std::fs::remove_file(dst).map_err(|e| e.to_string())?;
+            } else {
+                return Err("Destination exists and is not a file".to_string());
+            }
+        } else {
+            return Err("Destination already exists".to_string());
+        }
+    }
+
     std::fs::rename(src, dst).map_err(|e| e.to_string())?;
-    Ok("Success".to_string())
+    Ok(MoveResult {
+        original_path,
+        final_path: new_path,
+        renamed: false,
+    })
 }
 
 async fn process_file(path: std::path::PathBuf, api_key: String, app: AppHandle) {
@@ -166,9 +230,10 @@ async fn process_file(path: std::path::PathBuf, api_key: String, app: AppHandle)
 Rules:
 - 'new_filename': snake_case, 3-4 words max, descriptive, .png
 - 'category': ONE simple word from: Code, Finance, Social, Shopping, Email, Chat, Browser, Design, Documents, Settings, Media, Other
+- 'subcategory': optional, 1-3 words max, snake_case, more specific within the category
 - 'reasoning': 2-3 words why
 
-Example: {\"new_filename\": \"stripe_invoice.png\", \"category\": \"Finance\", \"reasoning\": \"payment receipt\"}";
+Example: {\"new_filename\": \"stripe_invoice.png\", \"category\": \"Finance\", \"subcategory\": \"Invoices\", \"reasoning\": \"payment receipt\"}";
 
     let messages = vec![AnthropicMessage {
         role: "user".to_string(),
@@ -227,6 +292,7 @@ Example: {\"new_filename\": \"stripe_invoice.png\", \"category\": \"Finance\", \
                     struct ClaudeResp {
                         new_filename: String,
                         category: String,
+                        subcategory: Option<String>,
                         reasoning: Option<String>,
                     }
 
@@ -236,12 +302,23 @@ Example: {\"new_filename\": \"stripe_invoice.png\", \"category\": \"Finance\", \
                             println!("[RUST] new_filename: {}", parsed.new_filename);
                             println!("[RUST] category: {}", parsed.category);
 
+                            let proposed_category = if let Some(subcategory) = parsed.subcategory {
+                                let trimmed = subcategory.trim();
+                                if trimmed.is_empty() {
+                                    parsed.category.clone()
+                                } else {
+                                    format!("{}/{}", parsed.category, trimmed)
+                                }
+                            } else {
+                                parsed.category.clone()
+                            };
+
                             let proposal = FileProposal {
                                 id: filename.clone(),
                                 original_path: path.to_string_lossy().to_string(),
                                 original_name: filename,
                                 proposed_name: parsed.new_filename,
-                                proposed_category: parsed.category,
+                                proposed_category,
                                 reasoning: parsed.reasoning.unwrap_or_default(),
                             };
 
@@ -278,6 +355,7 @@ fn start_watch(
     state: State<WatcherState>,
     path: String,
     api_key: String,
+    selected_paths: Option<Vec<String>>,
 ) -> Result<String, String> {
     println!("======================================");
     println!("[RUST] start_watch COMMAND CALLED");
@@ -290,11 +368,59 @@ fn start_watch(
     // Process existing files in the directory
     println!("[RUST] 🔍 Scanning for existing files in directory...");
     let dir_path = Path::new(&path);
-    let mut files_to_process = Vec::new();
-
+    let mut files_to_process: Vec<PathBuf> = Vec::new();
     let mut skipped_count: u32 = 0;
 
-    if let Ok(entries) = std::fs::read_dir(dir_path) {
+    if let Some(selected) = selected_paths.filter(|paths| !paths.is_empty()) {
+        println!("[RUST] Using {} selected file(s)", selected.len());
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for path_str in selected {
+            if !seen.insert(path_str.clone()) {
+                continue;
+            }
+            let file_path = PathBuf::from(&path_str);
+            if !file_path.starts_with(dir_path) {
+                println!("[RUST] ⚠️ Skipping {} - outside scan folder", path_str);
+                continue;
+            }
+            let filename = file_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            if !is_screenshot_png(&filename) {
+                continue;
+            }
+
+            let metadata = match std::fs::metadata(&file_path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    println!("[RUST] ⚠️ Failed to read metadata for {}: {}", filename, e);
+                    let _ = app.emit("file-failed", filename);
+                    continue;
+                }
+            };
+
+            let file_size = metadata.len();
+            if file_size > MAX_FILE_SIZE {
+                println!("[RUST] ⚠️ Skipping {} - exceeds 5MB", filename);
+                let _ = app.emit(
+                    "file-skipped",
+                    SkippedFile {
+                        name: filename,
+                        size: file_size,
+                        reason: "exceeds 5MB limit".to_string(),
+                    },
+                );
+                skipped_count += 1;
+                continue;
+            }
+
+            files_to_process.push(file_path);
+        }
+    } else if let Ok(entries) = std::fs::read_dir(dir_path) {
         for entry in entries.flatten() {
             if let Ok(file_type) = entry.file_type() {
                 if file_type.is_file() {
@@ -305,11 +431,7 @@ fn start_watch(
                         .to_string_lossy()
                         .to_string();
 
-                    let is_png = filename.to_lowercase().ends_with(".png");
-                    let has_screenshot =
-                        filename.contains("Screenshot") || filename.contains("Screen Shot");
-
-                    if is_png && has_screenshot {
+                    if is_screenshot_png(&filename) {
                         // Check file size
                         if let Ok(metadata) = entry.metadata() {
                             let file_size = metadata.len();
@@ -421,6 +543,46 @@ fn list_folder_screenshots(path: String) -> Result<Vec<FileInfo>, String> {
 
     println!("[RUST] Found {} screenshot files", files.len());
     Ok(files)
+}
+
+#[tauri::command]
+fn list_subfolders(path: String) -> Result<Vec<FolderInfo>, String> {
+    let dir_path = Path::new(&path);
+    if !dir_path.exists() {
+        return Err("Directory does not exist".to_string());
+    }
+
+    let mut folders: Vec<FolderInfo> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir_path) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_dir() {
+                    let folder_path = entry.path();
+                    let name = folder_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    folders.push(FolderInfo {
+                        path: folder_path.to_string_lossy().to_string(),
+                        name,
+                    });
+                }
+            }
+        }
+    }
+
+    folders.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(folders)
+}
+
+#[tauri::command]
+fn check_existing_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    let existing = paths
+        .into_iter()
+        .filter(|path| Path::new(path).exists())
+        .collect::<Vec<String>>();
+    Ok(existing)
 }
 
 #[tauri::command]
@@ -552,7 +714,9 @@ pub fn run() {
             stop_watch,
             execute_action,
             get_subcategory,
-            list_folder_screenshots
+            list_folder_screenshots,
+            list_subfolders,
+            check_existing_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

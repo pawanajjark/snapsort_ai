@@ -17,6 +17,9 @@ interface PreviewGridProps {
   onToggleSelect: (path: string) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
+  isReadOnly?: boolean;
+  processedFiles?: Set<string>;
+  hideProcessed?: boolean;
 }
 
 export function PreviewGrid({
@@ -26,9 +29,15 @@ export function PreviewGrid({
   onToggleSelect,
   onSelectAll,
   onDeselectAll,
+  isReadOnly = false,
+  processedFiles,
+  hideProcessed = false,
 }: PreviewGridProps) {
-  const validFiles = files.filter(f => f.is_valid);
-  const skippedFiles = files.filter(f => !f.is_valid);
+  const visibleFiles = hideProcessed && processedFiles
+    ? files.filter(f => !processedFiles.has(f.path))
+    : files;
+  const validFiles = visibleFiles.filter(f => f.is_valid);
+  const skippedFiles = visibleFiles.filter(f => !f.is_valid);
   const allSelected = validFiles.length > 0 && validFiles.every(f => selectedFiles.has(f.path));
 
   if (isLoading) {
@@ -40,15 +49,17 @@ export function PreviewGrid({
     );
   }
 
-  if (files.length === 0) {
+  if (visibleFiles.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full">
         <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mb-4">
           <Image className="w-7 h-7 text-white/20" />
         </div>
-        <p className="text-[15px] text-white/50 font-medium">No screenshots found</p>
+        <p className="text-[15px] text-white/50 font-medium">
+          {files.length === 0 ? "No screenshots found" : "All selected files processed"}
+        </p>
         <p className="text-[12px] text-white/30 mt-1">
-          Looking for PNG files with "Screenshot" in the name
+          Looking for PNG files with "screenshot" in the name
         </p>
       </div>
     );
@@ -69,24 +80,34 @@ export function PreviewGrid({
             </span>
           )}
         </div>
-        <button
-          onClick={allSelected ? onDeselectAll : onSelectAll}
-          className="text-[12px] text-white/50 hover:text-white/70 transition-colors"
-        >
-          {allSelected ? "Deselect All" : "Select All"}
-        </button>
+        {!isReadOnly ? (
+          <button
+            onClick={allSelected ? onDeselectAll : onSelectAll}
+            className="text-[12px] text-white/50 hover:text-white/70 transition-colors"
+          >
+            {allSelected ? "Deselect All" : "Select All"}
+          </button>
+        ) : (
+          <span className="text-[12px] text-white/30">Selections locked</span>
+        )}
       </div>
 
       {/* Thumbnail grid */}
       <div className="flex-1 overflow-y-auto p-4">
-        <div className="grid grid-cols-5 gap-3">
-          {files.map((file, index) => (
+        <div className="grid grid-cols-5 gap-3" data-preview-grid>
+          {visibleFiles.map((file, index) => (
             <PreviewThumbnail
               key={file.path}
               file={file}
               index={index}
               isSelected={selectedFiles.has(file.path)}
-              onToggle={() => onToggleSelect(file.path)}
+              onToggle={() => {
+                if (!isReadOnly) {
+                  onToggleSelect(file.path);
+                }
+              }}
+              isReadOnly={isReadOnly}
+              isProcessed={processedFiles?.has(file.path) ?? false}
             />
           ))}
         </div>
@@ -107,13 +128,18 @@ function PreviewThumbnail({
   index,
   isSelected,
   onToggle,
+  isReadOnly,
+  isProcessed,
 }: {
   file: FileInfo;
   index: number;
   isSelected: boolean;
   onToggle: () => void;
+  isReadOnly: boolean;
+  isProcessed: boolean;
 }) {
   const [loaded, setLoaded] = useState(false);
+  const previewKey = encodeURIComponent(file.path);
 
   return (
     <motion.div
@@ -124,15 +150,20 @@ function PreviewThumbnail({
         duration: 0.2,
         ease: "easeOut",
       }}
-      onClick={file.is_valid ? onToggle : undefined}
+      onClick={!isReadOnly && file.is_valid ? onToggle : undefined}
+      data-preview-key={previewKey}
       className={`
         relative aspect-square rounded-xl overflow-hidden cursor-pointer
         border-2 transition-all duration-150
         ${!file.is_valid 
           ? "opacity-40 cursor-not-allowed border-amber-500/30" 
+          : isProcessed
+            ? "opacity-20 border-transparent"
           : isSelected 
             ? "border-white/40 ring-2 ring-white/20" 
-            : "border-transparent hover:border-white/20"
+            : isReadOnly
+              ? "border-transparent"
+              : "border-transparent hover:border-white/20"
         }
       `}
     >
@@ -197,4 +228,3 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-

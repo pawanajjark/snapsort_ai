@@ -10,11 +10,10 @@ import { FileList } from "@/components/FileCard";
 import { PreviewPanel } from "@/components/PreviewPanel";
 import { SettingsSheet } from "@/components/SettingsSheet";
 import { EditModal } from "@/components/EditModal";
+import { ConflictDialog, type ConflictItem } from "@/components/ConflictDialog";
 import { FolderPicker } from "@/components/FolderPicker";
-import { SubcategoryDialog } from "@/components/SubcategoryDialog";
-import { ScanVisualization, createMovingFiles } from "@/components/ScanVisualization";
 import { PreviewGrid } from "@/components/PreviewGrid";
-import { optimizeFolderStructure, shouldSubdivide, formatCategory } from "@/lib/categoryMerge";
+import { optimizeFolderStructure, formatCategory, cleanupSubfolders } from "@/lib/categoryMerge";
 
 interface PreviewFile {
   path: string;
@@ -39,10 +38,22 @@ interface SkippedFile {
   reason: string;
 }
 
+interface MoveResult {
+  original_path: string;
+  final_path: string;
+  renamed: boolean;
+}
+
+interface MoveRecord {
+  proposal: FileProposal;
+  moved_path: string;
+  renamed: boolean;
+}
+
 function App() {
   // Settings
   const [apiKey, setApiKey] = useState("**REMOVED**");
-  const [path, setPath] = useState("/Users/pawan/Desktop");
+  const [path, setPath] = useState("/Users/pawan/Desktop/Select");
   const [showSettings, setShowSettings] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
 
@@ -66,19 +77,22 @@ function App() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileProposal | null>(null);
   const [editingFile, setEditingFile] = useState<FileProposal | null>(null);
+  const [moveErrors, setMoveErrors] = useState<Record<string, string>>({});
+  const [lastMoveBatch, setLastMoveBatch] = useState<MoveRecord[]>([]);
+  const [lastMoveRoot, setLastMoveRoot] = useState<string | null>(null);
+  const [showUndo, setShowUndo] = useState(false);
+  const [isUndoing, setIsUndoing] = useState(false);
+  const [undoStatus, setUndoStatus] = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
+  const [showConflictDialog, setShowConflictDialog] = useState(false);
+  const [overwriteIds, setOverwriteIds] = useState<Set<string>>(new Set());
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
 
   // Animation state for file movement
   const [exitingFileIds, setExitingFileIds] = useState<Set<string>>(new Set());
   const [isAccepting, setIsAccepting] = useState(false);
-  const [showScanViz, setShowScanViz] = useState(false);
-  const [movingFiles, setMovingFiles] = useState<ReturnType<typeof createMovingFiles>>([]);
-
-  // Auto-subcategorization state
-  const [isSubcategorizing, setIsSubcategorizing] = useState(false);
-  const [subcatCategory, setSubcatCategory] = useState("");
-  const [subcatCurrent, setSubcatCurrent] = useState(0);
-  const [subcatTotal, setSubcatTotal] = useState(0);
-  const [subcatRecentFile, setSubcatRecentFile] = useState("");
+  const [processedPreviewPaths, setProcessedPreviewPaths] = useState<Set<string>>(new Set());
 
   // Build folder tree from proposals
   const { folderTree, categoryList, fileCounts } = useMemo(() => {
@@ -100,14 +114,28 @@ function App() {
   // Files in selected category
   const filesInSelectedCategory = useMemo(() => {
     if (!selectedCategory) return [];
-    return proposals.filter(p =>
-      p.proposed_category === selectedCategory ||
-      p.proposed_category.startsWith(selectedCategory + '/')
-    );
+    return proposals.filter(p => p.proposed_category === selectedCategory);
+  }, [proposals, selectedCategory]);
+
+  const subfoldersInSelectedCategory = useMemo(() => {
+    if (!selectedCategory) return [];
+    const prefix = `${selectedCategory}/`;
+    const set = new Set<string>();
+    proposals.forEach((p) => {
+      if (p.proposed_category.startsWith(prefix)) {
+        const remainder = p.proposed_category.slice(prefix.length);
+        const next = remainder.split("/")[0];
+        if (next) {
+          set.add(`${selectedCategory}/${next}`);
+        }
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [proposals, selectedCategory]);
 
   const selectedCount = proposals.filter(p => p.selected).length;
   const totalCount = proposals.length;
+  const conflictIds = useMemo(() => new Set(conflicts.map(c => c.id)), [conflicts]);
 
   // Event listeners
   useEffect(() => {
@@ -128,6 +156,11 @@ function App() {
       };
       setProposals(prev => [...prev, proposal]);
       setProcessedFiles(prev => prev + 1);
+      setProcessedPreviewPaths(prev => {
+        const next = new Set(prev);
+        next.add(proposal.original_path);
+        return next;
+      });
     });
 
     const u3 = listen("file-skipped", (e: any) => {
@@ -144,6 +177,28 @@ function App() {
       u3.then(f => f());
     };
   }, []);
+
+  useEffect(() => {
+    if (!isResizingSidebar) return;
+
+    const handleMove = (event: MouseEvent) => {
+      const minWidth = 200;
+      const maxWidth = 420;
+      const next = Math.min(Math.max(event.clientX, minWidth), maxWidth);
+      setSidebarWidth(next);
+    };
+
+    const handleUp = () => {
+      setIsResizingSidebar(false);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isResizingSidebar]);
 
   useEffect(() => {
     if (!invoke || !listen) return;
@@ -205,6 +260,38 @@ function App() {
     setSelectedPreviews(new Set());
   }
 
+  function sanitizeSegment(value: string) {
+    return value.replace(/[\\\/]/g, "").replace(/[:*?"<>|]/g, "").trim();
+  }
+
+  function sanitizeCategoryPath(category: string) {
+    const parts = category
+      .split("/")
+      .map((part) => sanitizeSegment(part))
+      .filter((part) => part.length > 0 && part !== "." && part !== "..");
+    return parts.join("/");
+  }
+
+  function sanitizeFileName(name: string) {
+    const cleaned = sanitizeSegment(name);
+    if (cleaned.length === 0 || cleaned === "." || cleaned === "..") {
+      return "untitled.png";
+    }
+    return cleaned;
+  }
+
+  function ensurePng(name: string) {
+    return name.toLowerCase().endsWith(".png") ? name : `${name}.png`;
+  }
+
+  function getDestinationPath(file: FileProposal, rootPath: string) {
+    const parentDir = file.original_path.substring(0, file.original_path.lastIndexOf("/"));
+    const safeCategory = sanitizeCategoryPath(file.proposed_category) || "Other";
+    const safeName = ensurePng(sanitizeFileName(file.proposed_name));
+    const newPath = `${parentDir}/${safeCategory}/${safeName}`;
+    return { newPath, safeCategory, safeName, rootPath };
+  }
+
   // Auto-select first category
   useEffect(() => {
     if (categoryList.length > 0 && !selectedCategory) {
@@ -212,21 +299,42 @@ function App() {
     }
   }, [categoryList, selectedCategory]);
 
-  async function startScan() {
+  async function startScan(options?: { path?: string; selectedPaths?: string[] }) {
     if (isScanning) {
       await invoke("stop_watch");
       setIsScanning(false);
       setTotalFiles(0);
     } else {
       try {
+        const scanPath = options?.path ?? path;
+        const selectedPaths =
+          options?.selectedPaths ??
+          (!hasScanned ? Array.from(selectedPreviews) : undefined);
+
         setProposals([]);
         setSelectedCategory(null);
         setSelectedFile(null);
         setSkippedFiles([]);
         setShowSkippedNotice(false);
+        setMoveErrors({});
+        setLastMoveBatch([]);
+        setLastMoveRoot(null);
+        setShowUndo(false);
+        setUndoStatus(null);
+        setConflicts([]);
+        setShowConflictDialog(false);
+        setOverwriteIds(new Set());
+        setProcessedPreviewPaths(new Set());
         setHasScanned(true);
         setHasOptimized(false); // Reset optimization flag
-        await invoke("start_watch", { path, apiKey });
+        if (options?.path && options.path !== path) {
+          setPath(options.path);
+        }
+        await invoke("start_watch", {
+          path: scanPath,
+          apiKey,
+          selectedPaths: selectedPaths && selectedPaths.length > 0 ? selectedPaths : undefined,
+        });
         setIsScanning(true);
       } catch (e) {
         alert("Error: " + e);
@@ -241,6 +349,15 @@ function App() {
     setProposals([]);
     setSelectedCategory(null);
     setSelectedFile(null);
+    setMoveErrors({});
+    setLastMoveBatch([]);
+    setLastMoveRoot(null);
+    setShowUndo(false);
+    setUndoStatus(null);
+    setConflicts([]);
+    setShowConflictDialog(false);
+    setOverwriteIds(new Set());
+    setProcessedPreviewPaths(new Set());
     loadPreviewFiles();
   }
 
@@ -258,6 +375,12 @@ function App() {
           : p
       )
     );
+    setMoveErrors(prev => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     // Update selected category if changed
     if (category !== editingFile?.proposed_category) {
       setSelectedCategory(category);
@@ -291,8 +414,8 @@ function App() {
       setIsScanning(false);
     }
 
-    // Don't run optimization if already done or currently subdividing
-    if (isSubcategorizing || hasOptimized) return;
+    // Don't run optimization if already done
+    if (hasOptimized) return;
 
     // Small delay to let UI settle, then optimize
     const timer = setTimeout(() => {
@@ -300,116 +423,235 @@ function App() {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [proposals.length, processedFiles, totalFiles, isSubcategorizing, hasOptimized, isScanning]);
+  }, [proposals.length, processedFiles, totalFiles, hasOptimized, isScanning]);
 
   async function runOptimization() {
     console.log("[APP] Running folder optimization...");
 
     // Step 1: Optimize folder structure (merge small categories into "Other")
     const optimized = optimizeFolderStructure(proposals);
-    const hasChanges = optimized.some((o, i) => o.proposed_category !== proposals[i].proposed_category);
+    const cleaned = cleanupSubfolders(optimized);
+    const hasChanges = cleaned.some((o, i) => o.proposed_category !== proposals[i].proposed_category);
 
     if (hasChanges) {
       console.log("[APP] Merging small categories into Other");
-      setProposals(optimized);
+      setProposals(cleaned);
     }
-
-    // Step 2: Check for categories that need subdivision (20+ files)
-    const currentProposals = hasChanges ? optimized : proposals;
-    const categories = [...new Set(currentProposals.map(p => p.proposed_category))];
-
-    for (const category of categories) {
-      // Skip if already has subfolders
-      if (category.includes("/")) continue;
-
-      const filesInCategory = currentProposals.filter(p => p.proposed_category === category);
-
-      if (shouldSubdivide(filesInCategory.length)) {
-        console.log(`[APP] Category "${category}" has ${filesInCategory.length} files - subdividing`);
-        await subdivideCategory(category, filesInCategory);
-        // After subdividing one, mark as done (can be extended to handle multiple)
-        break;
-      }
-    }
-
     setHasOptimized(true);
   }
 
-  // Subdivide a large category into subfolders
-  async function subdivideCategory(category: string, files: FileProposal[]) {
-    setIsSubcategorizing(true);
-    setSubcatCategory(category);
-    setSubcatTotal(files.length);
-    setSubcatCurrent(0);
+  async function detectConflicts() {
+    const selectedFiles = proposals.filter(p => p.selected);
+    if (selectedFiles.length === 0) return [] as ConflictItem[];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      setSubcatRecentFile(file.original_name);
-      setSubcatCurrent(i + 1);
+    const entries = selectedFiles.map((file) => {
+      const { newPath, safeCategory, safeName } = getDestinationPath(file, path);
+      return {
+        id: file.id,
+        original_name: file.original_name,
+        proposed_name: safeName,
+        proposed_category: safeCategory,
+        destination: newPath,
+        reasons: [] as string[],
+      };
+    });
 
-      try {
-        const result = await invoke<{ id: string; subcategory: string }>(
-          "get_subcategory",
-          {
-            filePath: file.original_path,
-            parentCategory: category,
-            apiKey,
-          }
-        );
+    const destMap = new Map<string, ConflictItem[]>();
+    entries.forEach((entry) => {
+      const list = destMap.get(entry.destination) ?? [];
+      list.push(entry);
+      destMap.set(entry.destination, list);
+    });
 
-        // Update with subfolder
-        setProposals((prev) =>
-          prev.map((p) =>
-            p.id === file.id
-              ? { ...p, proposed_category: `${category}/${formatCategory(result.subcategory)}` }
-              : p
-          )
-        );
-      } catch (e) {
-        console.error("Subcategorization failed for", file.original_name, e);
-      }
+    const uniqueDestinations = Array.from(destMap.keys());
+    let existing = new Set<string>();
+    try {
+      const existingPaths = await invoke<string[]>("check_existing_paths", {
+        paths: uniqueDestinations,
+      });
+      existing = new Set(existingPaths);
+    } catch (e) {
+      console.warn("Conflict check failed:", e);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    setIsSubcategorizing(false);
+    entries.forEach((entry) => {
+      if ((destMap.get(entry.destination)?.length ?? 0) > 1) {
+        entry.reasons.push("Duplicate destination");
+      }
+      if (existing.has(entry.destination) && !overwriteIds.has(entry.id)) {
+        entry.reasons.push("File already exists");
+      }
+    });
+
+    return entries.filter((entry) => entry.reasons.length > 0);
+  }
+
+  async function refreshConflicts() {
+    const next = await detectConflicts();
+    setConflicts(next);
+    setShowConflictDialog(next.length > 0);
+    return next;
   }
 
   async function acceptAll() {
     const selectedFiles = proposals.filter(p => p.selected);
     if (selectedFiles.length === 0) return;
 
-    setIsAccepting(true);
+    const detected = await refreshConflicts();
+    if (detected.length > 0) return;
 
-    // Create moving files data and show visualization
-    const moving = createMovingFiles(selectedFiles);
-    setMovingFiles(moving);
-    setShowScanViz(true);
+    setIsAccepting(true);
+    await handleScanVizComplete();
   }
 
   async function handleScanVizComplete() {
     const selectedFiles = proposals.filter(p => p.selected);
+    const movedRecords: MoveRecord[] = [];
+    const failures: Record<string, string> = {};
 
-    // Move files
     for (const p of selectedFiles) {
-      const parentDir = p.original_path.substring(0, p.original_path.lastIndexOf('/'));
-      const newPath = `${parentDir}/${p.proposed_category}/${p.proposed_name}`;
+      const { newPath, safeCategory, safeName } = getDestinationPath(p, path);
+      const overwrite = overwriteIds.has(p.id);
+
       try {
-        await invoke("execute_action", { originalPath: p.original_path, newPath });
+        const result = await invoke<MoveResult>("execute_action", {
+          originalPath: p.original_path,
+          newPath,
+          rootPath: path,
+          overwrite,
+        });
+        movedRecords.push({
+          proposal: { ...p, proposed_category: safeCategory, proposed_name: safeName },
+          moved_path: result.final_path,
+          renamed: result.renamed,
+        });
       } catch (e) {
-        console.error("Move failed:", e);
+        failures[p.id] = String(e);
       }
     }
 
-    // Remove from state
-    setProposals(prev => prev.filter(p => !p.selected));
+    if (Object.keys(failures).length > 0) {
+      setMoveErrors(prev => ({ ...prev, ...failures }));
+    }
+
+    if (movedRecords.length > 0) {
+      const movedIds = new Set(movedRecords.map(m => m.proposal.id));
+      setProposals(prev => prev.filter(p => !movedIds.has(p.id)));
+      setLastMoveBatch(movedRecords);
+      setLastMoveRoot(path);
+      setShowUndo(true);
+      setUndoStatus(null);
+    }
+
     setExitingFileIds(new Set());
     setSelectedFile(null);
     setIsAccepting(false);
-    setShowScanViz(false);
-    setMovingFiles([]);
+    setOverwriteIds(new Set());
+  }
+
+  async function undoLastMove() {
+    if (isUndoing || lastMoveBatch.length === 0) return;
+
+    setIsUndoing(true);
+    const rootPath = lastMoveRoot ?? path;
+    const restored: FileProposal[] = [];
+    const remaining: MoveRecord[] = [];
+
+    for (const record of lastMoveBatch) {
+      try {
+        await invoke<MoveResult>("execute_action", {
+          originalPath: record.moved_path,
+          newPath: record.proposal.original_path,
+          rootPath,
+        });
+        restored.push(record.proposal);
+      } catch (e) {
+        remaining.push(record);
+      }
+    }
+
+    if (restored.length > 0) {
+      const restoredIds = new Set(restored.map(p => p.id));
+      setProposals(prev => [...restored, ...prev.filter(p => !restoredIds.has(p.id))]);
+    }
+
+    if (remaining.length === 0) {
+      setLastMoveBatch([]);
+      setLastMoveRoot(null);
+      setUndoStatus(`${restored.length} file${restored.length === 1 ? "" : "s"} restored`);
+      setShowUndo(true);
+    } else {
+      setLastMoveBatch(remaining);
+      setUndoStatus(`Undo failed for ${remaining.length} file${remaining.length === 1 ? "" : "s"}`);
+    }
+
+    setIsUndoing(false);
+  }
+
+  function handleConflictRename(id: string, nextName: string) {
+    setProposals(prev =>
+      prev.map(p =>
+        p.id === id
+          ? { ...p, proposed_name: nextName }
+          : p
+      )
+    );
+    setOverwriteIds(prev => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    setTimeout(() => {
+      refreshConflicts().catch(() => {});
+    }, 0);
+  }
+
+  function handleConflictSkip(id: string) {
+    setProposals(prev =>
+      prev.map(p =>
+        p.id === id
+          ? { ...p, selected: false }
+          : p
+      )
+    );
+    setOverwriteIds(prev => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    setTimeout(() => {
+      refreshConflicts().catch(() => {});
+    }, 0);
+  }
+
+  function handleConflictToggleOverwrite(id: string) {
+    setOverwriteIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+    setTimeout(() => {
+      refreshConflicts().catch(() => {});
+    }, 0);
+  }
+
+  async function handleConflictProceed() {
+    const latest = await refreshConflicts();
+    if (latest.length === 0) {
+      setShowConflictDialog(false);
+      setIsAccepting(true);
+      await handleScanVizComplete();
+    }
   }
 
   const isLoading = isScanning && processedFiles < totalFiles;
+  const isScanInProgress = isScanning && processedFiles < totalFiles;
   const hasResults = proposals.length > 0;
 
   return (
@@ -518,6 +760,43 @@ function App() {
         )}
       </AnimatePresence>
 
+      {/* Undo banner */}
+      <AnimatePresence>
+        {showUndo && (lastMoveBatch.length > 0 || undoStatus) && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            transition={{ duration: 0.2 }}
+            className="absolute bottom-4 right-4 z-50"
+          >
+            <div className="bg-white/10 border border-white/10 rounded-lg px-4 py-3 flex items-center gap-3 backdrop-blur-sm">
+              <div className="text-[12px] text-white/70">
+                {undoStatus ?? `${lastMoveBatch.length} file${lastMoveBatch.length === 1 ? "" : "s"} moved`}
+              </div>
+              <button
+                onClick={undoLastMove}
+                disabled={isUndoing || lastMoveBatch.length === 0}
+                className="text-[12px] px-2 py-1 rounded-md bg-white text-black disabled:opacity-50"
+              >
+                {isUndoing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Undo"}
+              </button>
+              <button
+                onClick={() => {
+                  setShowUndo(false);
+                  setLastMoveBatch([]);
+                  setLastMoveRoot(null);
+                  setUndoStatus(null);
+                }}
+                className="text-[11px] text-white/50 hover:text-white/70"
+              >
+                Dismiss
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Show PreviewGrid before scanning, Folder view after */}
@@ -531,12 +810,17 @@ function App() {
               onToggleSelect={togglePreviewSelect}
               onSelectAll={selectAllPreviews}
               onDeselectAll={deselectAllPreviews}
+              processedFiles={processedPreviewPaths}
+              hideProcessed={isScanning}
             />
           </main>
         ) : (
           <>
             {/* Left sidebar - Folder tree */}
-            <aside className="w-64 shrink-0 border-r border-white/5 bg-[var(--bg-secondary)] flex flex-col">
+            <aside
+              className="shrink-0 border-r border-white/5 bg-[var(--bg-secondary)] flex flex-col relative"
+              style={{ width: sidebarWidth }}
+            >
               <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
                 <h2 className="text-[11px] font-medium text-white/40 uppercase tracking-wider flex items-center gap-2">
                   <FolderOpen className="w-3 h-3" />
@@ -604,6 +888,12 @@ function App() {
                   </div>
                 </div>
               )}
+
+              <div
+                onMouseDown={() => setIsResizingSidebar(true)}
+                className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize bg-transparent hover:bg-white/10"
+                title="Drag to resize"
+              />
             </aside>
 
             {/* Middle - File list */}
@@ -629,14 +919,42 @@ function App() {
               )}
 
               <div className="flex-1 overflow-hidden">
-                <FileList
-                  files={filesInSelectedCategory}
-                  selectedFileId={selectedFile?.id || null}
-                  exitingFileIds={exitingFileIds}
-                  onSelectFile={setSelectedFile}
-                  onToggleSelection={toggleFileSelection}
-                  onEditFile={setEditingFile}
-                />
+                {hasResults && !isScanInProgress ? (
+                  <FileList
+                    files={filesInSelectedCategory}
+                    folders={subfoldersInSelectedCategory}
+                    selectedPath={selectedCategory}
+                    selectedFileId={selectedFile?.id || null}
+                    exitingFileIds={exitingFileIds}
+                    moveErrors={moveErrors}
+                    conflictIds={conflictIds}
+                    onSelectFile={setSelectedFile}
+                    onToggleSelection={toggleFileSelection}
+                    onEditFile={setEditingFile}
+                    onSelectFolder={setSelectedCategory}
+                  />
+                ) : (
+                  <div className="h-full relative">
+                    <PreviewGrid
+                      files={previewFiles}
+                      isLoading={isLoadingPreviews}
+                      selectedFiles={selectedPreviews}
+                      onToggleSelect={togglePreviewSelect}
+                      onSelectAll={selectAllPreviews}
+                      onDeselectAll={deselectAllPreviews}
+                      isReadOnly={hasScanned}
+                      processedFiles={processedPreviewPaths}
+                      hideProcessed={isScanning}
+                    />
+                    {isScanInProgress && (
+                      <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px] flex items-center justify-center">
+                        <div className="text-[12px] text-white/60">
+                          Analyzing {processedFiles}/{totalFiles}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </main>
 
@@ -685,28 +1003,23 @@ function App() {
         onOpenChange={setShowFolderPicker}
         currentPath={path}
         onSelectFolder={setPath}
-        onStartScan={startScan}
+        onStartScan={(scanPath, selectedPaths) =>
+          startScan({ path: scanPath, selectedPaths })
+        }
       />
 
-      {/* Subcategorization Dialog */}
-      <SubcategoryDialog
-        open={isSubcategorizing}
-        category={subcatCategory}
-        current={subcatCurrent}
-        total={subcatTotal}
-        recentFile={subcatRecentFile}
+      {/* Conflict Dialog */}
+      <ConflictDialog
+        open={showConflictDialog}
+        conflicts={conflicts}
+        overwriteIds={overwriteIds}
+        onRename={handleConflictRename}
+        onSkip={handleConflictSkip}
+        onToggleOverwrite={handleConflictToggleOverwrite}
+        onProceed={handleConflictProceed}
+        onClose={() => setShowConflictDialog(false)}
       />
 
-      {/* Scan Visualization */}
-      <AnimatePresence>
-        {showScanViz && (
-          <ScanVisualization
-            files={movingFiles}
-            isActive={showScanViz}
-            onComplete={handleScanVizComplete}
-          />
-        )}
-      </AnimatePresence>
     </div>
   );
 }
